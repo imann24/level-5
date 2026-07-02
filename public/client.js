@@ -384,10 +384,9 @@ function drawPlayer(p, x, y, t) {
   const cyc = Math.sin(t * 16 + p.id);
   const air = !p.og;
 
-  // head
+  // head and neck merge into one rounded thumb-like shape
   disc(cx, y + 3, 2.5, c);
-  // torso
-  stroke(cx, y + 6, cx, y + 12, c, 3);
+  stroke(cx, y + 4, cx, y + 12, c, 5);
 
   // legs
   const hip = y + 12;
