@@ -22,6 +22,10 @@ export class Room {
     this.phaseT = 0;
     this.countdown = 0;
     this.level = 1;
+    this.cycle = 1; // increments each time the level 5 boss is beaten
+    this.boss = null;
+    this.projectiles = [];
+    this.victoryT = 0;
     this.timer = 0;
     this.hazards = [];
     this.platforms = [];
@@ -106,8 +110,12 @@ export class Room {
 
   // ---- phase control ----
 
+  // effective difficulty keeps scaling across cycles
+  diff() { return this.level + (this.cycle - 1) * 5; }
+
   startGame() {
-    this.level = Number(process.env.START_LEVEL) || 1; // dev override for testing later levels
+    this.level = Number(process.env.START_LEVEL) || 1; // dev overrides for testing
+    this.cycle = Number(process.env.START_CYCLE) || 1;
     for (const p of this.players.values()) {
       p.inGame = true; p.alive = true; p.hp = 3;
       p.power = null; p.shield = false; p.swingT = 0;
@@ -122,6 +130,9 @@ export class Room {
     this.phaseT = 2.6;
     this.hazards = [];
     this.powerups = [];
+    this.projectiles = [];
+    this.boss = null;
+    this.victoryT = 0;
     this.floorState = 0;
     this.floorT = 6 + rand(8);
     this.spawnT = 0.8;
@@ -174,6 +185,30 @@ export class Room {
       p.vx = 0; p.vy = 0; p.onGround = false;
       p.invulnT = 0; p.hurtT = 0; p.swingT = 0;
     });
+
+    if (this.level === 5) this.setupBoss();
+  }
+
+  setupBoss() {
+    this.timer = 9999; // the boss level ends by defeating the boss, not by timer
+    const n = Math.max(1, [...this.players.values()].filter((p) => p.inGame).length);
+    const hp = Number(process.env.BOSS_HP) || 10 + (n - 1) * 3 + (this.cycle - 1) * 4;
+    this.boss = {
+      x: W / 2 - 14, y: -70, w: 28, h: 26,
+      hp, maxHp: hp, vx: 0, vy: 0, onGround: false, facing: -1,
+      dirT: 1.2, jumpT: 2.5, fireT: 2.8, hurtT: 0,
+    };
+    // reflecting requires gear: guarantee both a sword and a shield on the floor
+    const kinds = this.powerups.map((pu) => pu.kind);
+    for (const need of ['sword', 'shield']) {
+      if (!kinds.includes(need)) {
+        this.powerups.push({
+          id: this.nextEnt++, kind: need,
+          x: Math.floor(STAGE_L + 30 + rand(STAGE_R - STAGE_L - 70)),
+          y: FLOOR_Y - 9, vy: 0,
+        });
+      }
+    }
   }
 
   resetToLobby() {
@@ -181,6 +216,9 @@ export class Room {
     this.hazards = [];
     this.powerups = [];
     this.platforms = [];
+    this.boss = null;
+    this.projectiles = [];
+    this.victoryT = 0;
     this.floorState = 0;
     for (const p of this.players.values()) {
       p.ready = false; p.inGame = false; p.alive = true; p.hp = 3;
@@ -214,12 +252,36 @@ export class Room {
         break;
       case 'playing':
         this.simPlayers(dt);
-        this.simHazards(dt);
-        this.simFloor(dt);
+        if (this.level === 5) {
+          this.simBoss(dt);
+          this.simProjectiles(dt);
+        } else {
+          this.simHazards(dt);
+          this.simFloor(dt);
+        }
         this.simPowerups(dt);
         this.checkCollisions();
+
+        // boss defeated: short victory beat, then loop to level 1 of the next cycle
+        if (this.boss && this.boss.hp <= 0) {
+          this.events.push({ e: 'bossdead', x: this.boss.x + this.boss.w / 2, y: this.boss.y + this.boss.h / 2 });
+          this.boss = null;
+          this.projectiles = [];
+          this.victoryT = 2.4;
+        }
+        if (this.victoryT > 0) {
+          this.victoryT -= dt;
+          if (this.victoryT <= 0) {
+            this.cycle++;
+            this.level = 1;
+            this.events.push({ e: 'nextlevel' });
+            this.startLevel();
+          }
+          break;
+        }
+
         this.timer -= dt;
-        if (this.timer <= 0) {
+        if (this.level !== 5 && this.timer <= 0) {
           this.level++;
           this.events.push({ e: 'nextlevel' });
           this.startLevel();
@@ -314,6 +376,7 @@ export class Room {
     const hx = p.facing > 0 ? p.x + PW - 2 : p.x + 2 - reach;
     const hy = p.y - 8, hw = reach, hh = PH + 8;
     for (const h of this.hazards) {
+      if (h.kind === 'beam') continue; // light can't be cut
       if (p.swingHits.has(h.id)) continue;
       if (!aabb(hx, hy, hw, hh, h.x, h.y, h.w, h.h)) continue;
       p.swingHits.add(h.id);
@@ -331,6 +394,11 @@ export class Room {
       }
       h.life = Math.max(h.life, 5);
       this.events.push({ e: 'clang', x: h.x + h.w / 2, y: h.y + h.h / 2 });
+    }
+    // the sword also reflects boss projectiles
+    for (const pr of this.projectiles) {
+      if (pr.friendly) continue;
+      if (aabb(hx, hy, hw, hh, pr.x - 4, pr.y - 4, 8, 8)) this.reflect(pr);
     }
   }
 
@@ -384,62 +452,161 @@ export class Room {
     }
   }
 
+  // ---- boss (level 5) ----
+
+  simBoss(dt) {
+    const b = this.boss;
+    if (!b) return;
+    b.hurtT = Math.max(0, b.hurtT - dt);
+    b.dirT -= dt; b.jumpT -= dt; b.fireT -= dt;
+
+    if (b.dirT <= 0) {
+      b.vx = (rand() < 0.5 ? -1 : 1) * (38 + rand(46));
+      b.dirT = 0.8 + rand(1.5);
+    }
+    if (b.jumpT <= 0 && b.onGround) {
+      b.vy = -(190 + rand(130));
+      b.onGround = false;
+      b.jumpT = 1.4 + rand(2.2);
+    }
+
+    b.vy += GRAV * dt * 0.85;
+    if (b.vy > 420) b.vy = 420;
+    b.x = clamp(b.x + b.vx * dt, STAGE_L + 2, STAGE_R - 2 - b.w);
+    b.y += b.vy * dt;
+    if (b.y + b.h >= FLOOR_Y) { b.y = FLOOR_Y - b.h; b.vy = 0; b.onGround = true; }
+    if (b.vx) b.facing = b.vx < 0 ? -1 : 1;
+
+    // fire a projectile at a random living player (not while dropping in)
+    if (b.fireT <= 0 && b.y > 10) {
+      const targets = [...this.players.values()].filter((p) => p.inGame && p.alive);
+      if (targets.length) {
+        const t = targets[Math.floor(rand(targets.length))];
+        const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+        const dx = t.x + PW / 2 - cx, dy = t.y + PH / 2 - cy;
+        const d = Math.hypot(dx, dy) || 1;
+        const sp = 92 + (this.cycle - 1) * 14;
+        this.projectiles.push({
+          id: this.nextEnt++, x: cx, y: cy,
+          vx: (dx / d) * sp, vy: (dy / d) * sp, friendly: false,
+        });
+        this.events.push({ e: 'bossfire', x: cx, y: cy });
+      }
+      b.fireT = Math.max(0.8, 2.1 - (this.cycle - 1) * 0.2) * (0.7 + rand(0.6));
+    }
+  }
+
+  simProjectiles(dt) {
+    const b = this.boss;
+    this.projectiles = this.projectiles.filter((pr) => {
+      pr.x += pr.vx * dt;
+      pr.y += pr.vy * dt;
+      if (pr.x < STAGE_L - 30 || pr.x > STAGE_R + 30 || pr.y < -50 || pr.y > H + 40) return false;
+      if (pr.friendly && b && aabb(pr.x - 3, pr.y - 3, 6, 6, b.x, b.y, b.w, b.h)) {
+        b.hp--;
+        b.hurtT = 0.35;
+        this.events.push({ e: 'bosshit', x: pr.x, y: pr.y });
+        return false;
+      }
+      return true;
+    });
+  }
+
+  // a reflected projectile turns green and homes at the boss
+  reflect(pr) {
+    const b = this.boss;
+    const sp = (Math.hypot(pr.vx, pr.vy) || 95) * 1.25;
+    if (b) {
+      const dx = b.x + b.w / 2 - pr.x, dy = b.y + b.h / 2 - pr.y;
+      const d = Math.hypot(dx, dy) || 1;
+      pr.vx = (dx / d) * sp;
+      pr.vy = (dy / d) * sp;
+    } else {
+      pr.vx = -pr.vx * 1.25;
+      pr.vy = -pr.vy * 1.25;
+    }
+    pr.friendly = true;
+    this.events.push({ e: 'reflect', x: pr.x, y: pr.y });
+  }
+
   // ---- hazards ----
 
   simHazards(dt) {
     this.spawnT -= dt;
-    const maxH = Math.min(3 + this.level, 9);
+    const maxH = Math.min(3 + this.diff(), 10);
     if (this.spawnT <= 0 && this.hazards.length < maxH) {
       this.spawnHazard();
-      this.spawnT = Math.max(0.7, 2.4 - this.level * 0.18) * (0.7 + rand(0.6));
+      this.spawnT = Math.max(0.6, 2.4 - this.diff() * 0.18) * (0.7 + rand(0.6));
     }
     for (const h of this.hazards) {
       h.life -= dt;
       h.blockCd = Math.max(0, (h.blockCd || 0) - dt);
+      if (h.kind === 'beam') { h.t += dt; continue; } // beams fade in, they don't move
       h.x += h.vx * dt;
       h.y += h.vy * dt;
-      if (h.kind === 'tri') {
-        if (h.axis === 'h') {
-          const minX = STAGE_L + 2, maxX = STAGE_R - h.w - 2;
-          if (h.x < minX) { h.x = minX; h.vx = Math.abs(h.vx); }
-          if (h.x > maxX) { h.x = maxX; h.vx = -Math.abs(h.vx); }
-        } else {
-          const minY = 50, maxY = FLOOR_Y - h.h;
-          if (h.y < minY) { h.y = minY; h.vy = Math.abs(h.vy); }
-          if (h.y > maxY) { h.y = maxY; h.vy = -Math.abs(h.vy); }
-        }
+      if (h.kind === 'tri' && h.axis === 'v') {
+        const minY = 50, maxY = FLOOR_Y - h.h;
+        if (h.y < minY) { h.y = minY; h.vy = Math.abs(h.vy); }
+        if (h.y > maxY) { h.y = maxY; h.vy = -Math.abs(h.vy); }
+      } else if ((h.kind === 'tri' && h.axis === 'h') || h.kind === 'spike') {
+        const minX = STAGE_L + 2, maxX = STAGE_R - h.w - 2;
+        if (h.x < minX) { h.x = minX; h.vx = Math.abs(h.vx); }
+        if (h.x > maxX) { h.x = maxX; h.vx = -Math.abs(h.vx); }
       }
     }
     this.hazards = this.hazards.filter((h) => {
       if (h.kind === 'ball') return h.x > STAGE_L - 40 && h.x < STAGE_R + 40 && h.life > 0;
+      if (h.kind === 'beam') return h.t < h.charge + h.active;
       return h.life > 0;
     });
   }
 
   spawnHazard() {
-    const speed = 55 + this.level * 7 + rand(35);
+    const speed = 55 + this.diff() * 7 + rand(35);
     const r = rand();
     const dir = rand() < 0.5 ? 1 : -1;
-    if (r < 0.42) { // horizontal triangle
+    const cyc2 = this.cycle >= 2; // spikes and light beams join the pool after beating the boss
+    if (r < (cyc2 ? 0.28 : 0.42)) { // horizontal triangle
       this.hazards.push({
         id: this.nextEnt++, kind: 'tri', axis: 'h',
         x: dir > 0 ? STAGE_L + 3 : STAGE_R - 16,
         y: 106 + rand(84), w: 13, h: 13,
         vx: dir * speed, vy: 0, life: 8 + rand(4), blockCd: 0,
       });
-    } else if (r < 0.75) { // vertical triangle
+    } else if (r < (cyc2 ? 0.52 : 0.75)) { // vertical triangle
       this.hazards.push({
         id: this.nextEnt++, kind: 'tri', axis: 'v',
         x: STAGE_L + 12 + rand(STAGE_R - STAGE_L - 40),
         y: 52, w: 13, h: 13,
         vx: 0, vy: speed, life: 8 + rand(4), blockCd: 0,
       });
-    } else { // rolling ball
+    } else if (!cyc2 || r < 0.70) { // rolling ball
       this.hazards.push({
         id: this.nextEnt++, kind: 'ball',
         x: dir > 0 ? STAGE_L - 20 : STAGE_R + 4,
         y: FLOOR_Y - 16, w: 16, h: 16,
         vx: dir * (speed * 1.15), vy: 0, life: 14, blockCd: 0,
+      });
+    } else if (r < 0.85) { // ground spike crawler
+      this.hazards.push({
+        id: this.nextEnt++, kind: 'spike',
+        x: dir > 0 ? STAGE_L + 3 : STAGE_R - 21,
+        y: FLOOR_Y - 9, w: 18, h: 9,
+        vx: dir * speed * 0.85, vy: 0, life: 11 + rand(4), blockCd: 0,
+      });
+    } else { // light beam: fades 0 -> 100% opacity, hitbox only at 100%
+      const vert = rand() < 0.55;
+      const charge = Math.max(1.1, 1.9 - this.diff() * 0.04);
+      this.hazards.push(vert ? {
+        id: this.nextEnt++, kind: 'beam', orient: 'v',
+        x: Math.floor(STAGE_L + 8 + rand(STAGE_R - STAGE_L - 30)), y: 40,
+        w: 13, h: FLOOR_Y - 40,
+        vx: 0, vy: 0, t: 0, charge, active: 0.5, life: 99, blockCd: 0,
+      } : {
+        id: this.nextEnt++, kind: 'beam', orient: 'h',
+        x: STAGE_L + 2, y: Math.floor(96 + rand(96)),
+        w: STAGE_R - STAGE_L - 4, h: 11,
+        vx: 0, vy: 0, t: 0, charge, active: 0.5, life: 99, blockCd: 0,
       });
     }
   }
@@ -495,8 +662,34 @@ export class Room {
         }
       }
 
+      // boss projectiles: shield reflects them, otherwise they hurt
+      for (const pr of this.projectiles) {
+        if (pr.friendly || pr.dead) continue;
+        if (!aabb(p.x - 1, p.y - 1, PW + 2, PH + 2, pr.x - 4, pr.y - 4, 8, 8)) continue;
+        if (p.shield) {
+          this.reflect(pr);
+        } else if (p.invulnT <= 0) {
+          pr.dead = true;
+          this.damage(p, -80);
+        }
+      }
+
+      // boss body contact
+      if (this.boss && p.invulnT <= 0) {
+        const b = this.boss;
+        if (aabb(p.x, p.y, PW, PH, b.x + 3, b.y + 3, b.w - 6, b.h - 6)) this.damage(p, -140);
+      }
+
       if (p.invulnT <= 0) {
         for (const h of this.hazards) {
+          if (h.kind === 'beam') {
+            // hitbox triggers only once the beam reaches full opacity
+            if (h.t >= h.charge && aabb(p.x, p.y, PW, PH, h.x + 2, h.y + 1, h.w - 4, h.h - 2)) {
+              this.damage(p, -80);
+              break;
+            }
+            continue;
+          }
           if (!aabb(p.x, p.y, PW, PH, h.x + 2, h.y + 2, h.w - 4, h.h - 4)) continue;
           if (p.shield && h.blockCd <= 0) {
             // bounce the hazard away
@@ -522,6 +715,7 @@ export class Room {
         this.damage(p, -230);
       }
     }
+    this.projectiles = this.projectiles.filter((pr) => !pr.dead);
   }
 
   damage(p, popVy) {
@@ -548,8 +742,20 @@ export class Room {
       pt: +this.phaseT.toFixed(3),
       cd: +this.countdown.toFixed(3),
       lv: this.level,
+      cy: this.cycle,
       tm: Math.max(0, this.timer),
       fl: this.floorState,
+      vt: this.victoryT > 0 ? 1 : 0,
+      bs: this.boss ? {
+        x: +this.boss.x.toFixed(1), y: +this.boss.y.toFixed(1),
+        w: this.boss.w, h: this.boss.h,
+        hp: this.boss.hp, mhp: this.boss.maxHp,
+        ht: this.boss.hurtT > 0 ? 1 : 0, f: this.boss.facing,
+        vx: Math.round(this.boss.vx), og: this.boss.onGround ? 1 : 0,
+      } : null,
+      pr: this.projectiles.map((pr) => ({
+        id: pr.id, x: +pr.x.toFixed(1), y: +pr.y.toFixed(1), fr: pr.friendly ? 1 : 0,
+      })),
       pl: [...this.players.values()].map((p) => ({
         id: p.id, c: p.color, rdy: p.ready ? 1 : 0,
         ig: p.inGame ? 1 : 0, al: p.alive ? 1 : 0,
@@ -563,6 +769,11 @@ export class Room {
         id: h.id, k: h.kind, ax: h.axis || null,
         x: +h.x.toFixed(1), y: +h.y.toFixed(1),
         vx: Math.round(h.vx), vy: Math.round(h.vy), w: h.w, h: h.h,
+        ...(h.kind === 'beam' ? {
+          o: h.orient,
+          a: +Math.min(1, h.t / h.charge).toFixed(2),
+          act: h.t >= h.charge ? 1 : 0,
+        } : null),
       })),
       pf: this.platforms.map((pl) => ({ id: pl.id, x: pl.x, y: pl.y, w: pl.w, h: pl.h })),
       pu: this.powerups.map((pu) => ({ id: pu.id, k: pu.kind, x: Math.round(pu.x), y: Math.round(pu.y), fl: pu.float ? 1 : 0 })),

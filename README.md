@@ -37,6 +37,18 @@ respawned. If every player disappears, the game ends and everyone returns to the
 From level 2 onward, green floating health pickups appear; touch one while hurt to
 restore a hit point (there is no automatic healing between levels).
 
+**Boss fight (level 5)**
+
+Level 5 is a boss fight: a big red brute with a health bar who runs, jumps, and
+fires projectiles at you. Reflect his projectiles back with a sword swing or a
+raised shield — reflected shots turn green and home in on him. Deplete his
+health bar to win the fight.
+
+Beating the boss loops the game back to level 1 on a harder cycle with new
+obstacles: red spikes that scuttle along the ground, and light beams (vertical
+columns or horizontal bars) that fade in from 0 to 100% opacity — their hitbox
+only triggers at full opacity, so dodge out of their line before they solidify.
+
 **Powerups**
 - Sword: swinging it at a hazard flips its orientation (horizontal movers become vertical and vice versa; balls are knocked back)
 - Shield: raise it to block hazards without taking damage

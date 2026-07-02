@@ -173,6 +173,107 @@ tick(room, 3);
 check('dead player respawns next level', a.alive && a.hp === 3);
 check('survivor hp carries over (no auto-heal)', b.alive && b.hp === 2);
 
+// ---- level 5 boss fight ----
+{
+  const r3 = new Room();
+  r3.addSocket(fakeWs()); r3.addSocket(fakeWs());
+  const [pa, pb] = [...r3.players.values()];
+  for (const p of r3.players.values()) { p.inGame = true; p.alive = true; p.hp = 3; }
+  r3.level = 5;
+  r3.startLevel();
+  r3.phase = 'playing';
+  check('boss exists on level 5 with full hp', r3.boss && r3.boss.hp === r3.boss.maxHp && r3.boss.maxHp > 0);
+  const kinds = r3.powerups.map((q) => q.kind);
+  check('boss level guarantees sword and shield', kinds.includes('sword') && kinds.includes('shield'));
+
+  // boss falls in, moves, jumps, fires
+  pa.x = 40; pa.y = 206 - 18; pb.x = 210; pb.y = 206 - 18;
+  r3.boss.fireT = 0.01;
+  tick(r3, 40); // give the boss time to drop onto the stage, then fire
+  check('boss fires projectiles', r3.projectiles.length > 0);
+  check('boss projectile is hostile', r3.projectiles.every((pr) => !pr.friendly));
+
+  // shield reflects: projectile turns friendly (green) and heads for the boss
+  r3.projectiles.length = 0;
+  r3.boss.fireT = 999; // deterministic from here on
+  pa.hp = 3; pb.hp = 3; pa.invulnT = 0; pb.invulnT = 0; pa.alive = pb.alive = true;
+  pb.x = 210; pb.y = 206 - 18; pb.vy = 0;
+  pb.power = 'shield'; pb.in.use = 1;
+  tick(r3, 1); // let shield raise
+  const pr1 = { id: 9001, x: pb.x + 6, y: pb.y + 9, vx: -60, vy: 0, friendly: false };
+  r3.projectiles.push(pr1);
+  r3.boss.x = 40; r3.boss.y = 206 - 26;
+  tick(r3, 1);
+  check('shield reflects projectile to friendly', pr1.friendly === true);
+  check('reflected projectile flies toward boss', pr1.vx < 0);
+  check('no damage taken when reflecting', pb.hp === 3);
+
+  // sword reflects too
+  pa.power = 'sword'; pa.facing = 1; pa.swingCd = 0;
+  const pr2 = { id: 9002, x: pa.x + 18, y: pa.y + 6, vx: -1, vy: 0, friendly: false };
+  r3.projectiles.push(pr2);
+  pa.edge.use = true;
+  tick(r3, 3);
+  check('sword swing reflects projectile', pr2.friendly === true);
+
+  // friendly projectile damages the boss
+  r3.projectiles.length = 0;
+  const bhp = r3.boss.hp;
+  r3.projectiles.push({ id: 9003, x: r3.boss.x - 8, y: r3.boss.y + 10, vx: 200, vy: 0, friendly: true });
+  tick(r3, 3);
+  check('reflected projectile hits boss', r3.boss.hp === bhp - 1);
+
+  // unreflected projectile hurts a player
+  pb.in.use = 0; pb.power = null; pb.invulnT = 0;
+  tick(r3, 1);
+  r3.projectiles.length = 0;
+  r3.projectiles.push({ id: 9004, x: pb.x + 6, y: pb.y + 9, vx: 1, vy: 0, friendly: false });
+  tick(r3, 1);
+  check('hostile projectile damages player', pb.hp === 2);
+
+  // no timer-based level advance during the boss
+  r3.timer = 0.01; // should be 9999, but force it to prove the guard
+  tick(r3, 3);
+  check('boss level does not advance by timer', r3.level === 5);
+
+  // killing the boss loops to level 1, cycle 2
+  r3.boss.hp = 1;
+  r3.projectiles.push({ id: 9005, x: r3.boss.x - 8, y: r3.boss.y + 10, vx: 200, vy: 0, friendly: true });
+  tick(r3, 3);
+  check('boss dies and victory pause starts', r3.boss === null && r3.victoryT > 0);
+  tick(r3, Math.ceil(2.5 * 30));
+  check('after victory: cycle 2, level 1', r3.cycle === 2 && r3.level === 1 && r3.phase === 'intro');
+
+  // cycle 2 spawn pool includes spikes and beams
+  r3.hazards.length = 0;
+  for (let i = 0; i < 80; i++) r3.spawnHazard();
+  const ks = new Set(r3.hazards.map((h) => h.kind));
+  check('cycle 2 spawns spikes', ks.has('spike'));
+  check('cycle 2 spawns light beams', ks.has('beam'));
+
+  // cycle 1 never spawns them
+  const r4 = new Room();
+  r4.hazards.length = 0;
+  for (let i = 0; i < 80; i++) r4.spawnHazard();
+  const ks1 = new Set(r4.hazards.map((h) => h.kind));
+  check('cycle 1 has no spikes or beams', !ks1.has('spike') && !ks1.has('beam'));
+
+  // beam hitbox triggers only at 100% opacity
+  r3.phase = 'playing';
+  r3.hazards.length = 0; r3.powerups.length = 0; r3.spawnT = 999; r3.floorT = 999; r3.timer = 999;
+  pa.alive = true; pa.hp = 3; pa.invulnT = 0; pa.power = null; pa.x = 100; pa.y = 206 - 18; pa.vy = 0;
+  const beam = {
+    id: 9100, kind: 'beam', orient: 'v', x: pa.x - 2, y: 40, w: 13, h: 206 - 40,
+    vx: 0, vy: 0, t: 0, charge: 1.6, active: 0.5, life: 99, blockCd: 0,
+  };
+  r3.hazards.push(beam);
+  tick(r3, 2);
+  check('charging beam does not hurt', pa.hp === 3);
+  beam.t = 1.65;
+  tick(r3, 1);
+  check('fully opaque beam hurts', pa.hp === 2);
+}
+
 // 5th connection is spectator
 const extra = [fakeWs(), fakeWs(), fakeWs()];
 extra.forEach((w) => room.addSocket(w));

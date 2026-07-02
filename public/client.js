@@ -40,6 +40,8 @@ ws.onmessage = (e) => {
   curPos = new Map();
   for (const p of m.pl) curPos.set('p' + p.id, { x: p.x, y: p.y });
   for (const h of m.hz) curPos.set('h' + h.id, { x: h.x, y: h.y });
+  for (const pr of m.pr || []) curPos.set('r' + pr.id, { x: pr.x, y: pr.y });
+  if (m.bs) curPos.set('boss', { x: m.bs.x, y: m.bs.y });
   lastMsgAt = performance.now();
   snap = m;
   window.__snap = m; window.__myId = myId;
@@ -105,6 +107,10 @@ function onEvent(ev) {
     case 'heal': burst(ev.x, ev.y, 12, GREEN, 55, true); break;
     case 'drop': burst(ev.x, ev.y, 4, PERI, 30, true); break;
     case 'floorred': shakeT = 0.2; break;
+    case 'bossfire': burst(ev.x, ev.y, 5, RED, 45); break;
+    case 'reflect': burst(ev.x, ev.y, 9, GREEN, 65); shakeT = 0.1; break;
+    case 'bosshit': burst(ev.x, ev.y, 12, GREEN, 75); shakeT = 0.15; break;
+    case 'bossdead': burst(ev.x, ev.y, 40, RED, 110); burst(ev.x, ev.y, 20, WHITE, 80); shakeT = 0.5; break;
   }
 }
 
@@ -329,6 +335,83 @@ function drawBall(h, x, y, t) {
   px(mx - 1, my - 1, 2, 2, DARKRED);
 }
 
+// ---- boss + cycle-2 hazards ----
+function drawBoss(b, x, y, t) {
+  const flash = b.ht && Math.floor(t * 16) % 2 === 0;
+  const body = flash ? WHITE : RED;
+  const cx = x + b.w / 2, cy = y + b.h / 2;
+  // hulking blob body
+  disc(cx, cy + 2, 11, body);
+  disc(cx - 6, cy - 5, 7, body);
+  disc(cx + 6, cy - 5, 7, body);
+  // horns
+  stroke(cx - 9, cy - 10, cx - 12, cy - 16, body, 3);
+  stroke(cx + 9, cy - 10, cx + 12, cy - 16, body, 3);
+  // stubby feet
+  px(cx - 9, y + b.h - 3, 5, 3, body);
+  px(cx + 4, y + b.h - 3, 5, 3, body);
+  if (!flash) {
+    // angry eyes track facing
+    const ex = b.f * 2;
+    px(cx - 6 + ex, cy - 6, 3, 4, '#000');
+    px(cx + 3 + ex, cy - 6, 3, 4, '#000');
+    stroke(cx - 8 + ex, cy - 9, cx - 3 + ex, cy - 7, '#000', 2);
+    stroke(cx + 6 + ex, cy - 7, cx + 11 + ex, cy - 9, '#000', 2);
+    // jagged mouth
+    for (let i = 0; i < 4; i++) px(cx - 6 + i * 3, cy + 3 + (i % 2), 3, 2, DARKRED);
+  }
+}
+
+function drawBossBar(bs, t) {
+  const bw = 110, bx = W / 2 - bw / 2, by = 10;
+  drawTextC('BOSS', W / 2, by - 8, 1, RED, 21);
+  wobblyLine(bx - 2, by, bx + bw + 2, by, WHITE, 2, 31, 0.6);
+  wobblyLine(bx - 2, by + 9, bx + bw + 2, by + 9, WHITE, 2, 32, 0.6);
+  stroke(bx - 2, by, bx - 2, by + 9, WHITE, 2);
+  stroke(bx + bw + 2, by, bx + bw + 2, by + 9, WHITE, 2);
+  const fill = Math.max(0, Math.round((bs.hp / bs.mhp) * (bw - 2)));
+  if (fill > 0) px(bx + 1, by + 2, fill, 6, bs.ht && Math.floor(t * 16) % 2 === 0 ? WHITE : RED);
+}
+
+function drawProjectile(pr, x, y, t) {
+  const c = pr.fr ? GREEN : RED;
+  disc(x, y, 3, c);
+  // crackle
+  const a = t * 9 + pr.id;
+  px(x + Math.cos(a) * 5 - 1, y + Math.sin(a) * 5 - 1, 2, 2, pr.fr ? '#aef7c2' : DARKRED);
+}
+
+function drawSpike(h, x, y, t) {
+  ctx.fillStyle = RED;
+  const n = 3, sw = h.w / n;
+  for (let i = 0; i < n; i++) {
+    ctx.beginPath();
+    ctx.moveTo(x + i * sw, y + h.h);
+    ctx.lineTo(x + i * sw + sw, y + h.h);
+    ctx.lineTo(x + i * sw + sw / 2, y);
+    ctx.closePath(); ctx.fill();
+  }
+  // scuttle marks behind
+  const back = h.vx > 0 ? x - 5 - (Math.floor(t * 10) % 2) * 2 : x + h.w + 3 + (Math.floor(t * 10) % 2) * 2;
+  px(back, y + h.h - 3, 3, 2, DARKRED);
+  px(back + (h.vx > 0 ? -4 : 4), y + h.h - 2, 3, 2, DARKRED);
+}
+
+function drawBeam(h, t) {
+  const charging = !h.act;
+  const alpha = charging ? 0.08 + h.a * 0.55 : 1;
+  ctx.globalAlpha = alpha;
+  const hot = h.act && Math.floor(t * 20) % 2 === 0;
+  const c = h.act ? (hot ? WHITE : RED) : '#f2e59e';
+  px(h.x, h.y, h.w, h.h, c);
+  if (h.act) {
+    ctx.globalAlpha = 0.9;
+    if (h.o === 'v') { px(h.x + 2, h.y, 2, h.h, WHITE); px(h.x + h.w - 4, h.y, 2, h.h, WHITE); }
+    else { px(h.x, h.y + 2, h.w, 2, WHITE); px(h.x, h.y + h.h - 4, h.w, 2, WHITE); }
+  }
+  ctx.globalAlpha = 1;
+}
+
 // ---- stage ----
 function drawStage(floorState, t) {
   // rounded hand-drawn stage box
@@ -419,9 +502,20 @@ function drawGame(s, t) {
   }
 
   for (const h of s.hz) {
+    if (h.k === 'beam') { drawBeam(h, t); continue; }
     const pos = lerpPos('h' + h.id, h);
     if (h.k === 'tri') drawTriangle(h, pos.x, pos.y, t);
+    else if (h.k === 'spike') drawSpike(h, pos.x, pos.y, t);
     else drawBall(h, pos.x, pos.y, t);
+  }
+
+  if (s.bs) {
+    const bp = lerpPos('boss', s.bs);
+    drawBoss(s.bs, bp.x, bp.y, t);
+  }
+  for (const pr of s.pr || []) {
+    const pos = lerpPos('r' + pr.id, pr);
+    drawProjectile(pr, pos.x, pos.y, t);
   }
 
   for (const p of s.pl) {
@@ -442,12 +536,19 @@ function drawGame(s, t) {
 
   // HUD
   if (s.ph === 'playing') {
-    const tm = Math.ceil(s.tm);
-    const mm = Math.floor(tm / 60), ss = tm % 60;
-    drawTextC('- ' + mm + ' : ' + (ss < 10 ? '0' : '') + ss, W / 2, 14, 2, WHITE, 11);
+    if (s.bs) {
+      drawBossBar(s.bs, t);
+    } else if (s.vt) {
+      drawTextC('BOSS DEFEATED!', W / 2, 60, 2, GREEN, 17);
+    } else {
+      const tm = Math.ceil(s.tm);
+      const mm = Math.floor(tm / 60), ss = tm % 60;
+      drawTextC('- ' + mm + ' : ' + (ss < 10 ? '0' : '') + ss, W / 2, 14, 2, WHITE, 11);
+    }
   }
   if (s.ph === 'intro') {
-    drawText('LEVEL ' + s.lv, 24, 18, 3, WHITE, s.lv);
+    drawText('LEVEL ' + s.lv, 24, 18, 3, WHITE, s.lv + (s.cy - 1) * 5);
+    if (s.lv === 5) drawTextC('BOSS FIGHT', W / 2, 46, 1, RED, 23);
   }
   if (s.ph === 'gameover') {
     drawTextC('GAME OVER', W / 2, 100, 3, RED, 13);
