@@ -26,6 +26,95 @@ let myId = null, full = false, connected = false;
 let snap = null, prevPos = new Map(), curPos = new Map(), lastMsgAt = 0;
 const particles = [];
 let shakeT = 0;
+let lastStepAt = 0;
+
+// ---- audio: procedural chiptune SFX (no asset files) ----
+let actx = null, master = null, muted = false;
+function ensureAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  if (!actx) {
+    actx = new AC();
+    master = actx.createGain();
+    master.gain.value = muted ? 0 : 0.32;
+    master.connect(actx.destination);
+  }
+  if (actx.state === 'suspended') actx.resume();
+}
+addEventListener('keydown', ensureAudio);
+addEventListener('mousedown', ensureAudio);
+
+function tone(o) {
+  if (!actx || muted) return;
+  const { type = 'square', f0 = 440, f1 = 0, dur = 0.1, vol = 0.5, delay = 0 } = o;
+  const t0 = actx.currentTime + delay;
+  const osc = actx.createOscillator();
+  const g = actx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(Math.max(1, f0), t0);
+  if (f1) osc.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t0 + dur);
+  g.gain.setValueAtTime(Math.max(0.001, vol), t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  osc.connect(g); g.connect(master);
+  osc.start(t0); osc.stop(t0 + dur + 0.03);
+}
+function noise(o) {
+  if (!actx || muted) return;
+  const { dur = 0.15, vol = 0.4, f = 1000, q = 1, delay = 0, sweepTo = 0 } = o;
+  const t0 = actx.currentTime + delay;
+  const len = Math.max(1, Math.floor(actx.sampleRate * dur));
+  const buf = actx.createBuffer(1, len, actx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+  const src = actx.createBufferSource();
+  src.buffer = buf;
+  const flt = actx.createBiquadFilter();
+  flt.type = 'bandpass';
+  flt.frequency.setValueAtTime(Math.max(1, f), t0);
+  flt.Q.value = q;
+  if (sweepTo) flt.frequency.exponentialRampToValueAtTime(Math.max(1, sweepTo), t0 + dur);
+  const g = actx.createGain();
+  g.gain.setValueAtTime(Math.max(0.001, vol), t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  src.connect(flt); flt.connect(g); g.connect(master);
+  src.start(t0); src.stop(t0 + dur + 0.03);
+}
+
+const SFX = {
+  color: () => tone({ f0: 520, f1: 680, dur: 0.06, vol: 0.22 }),
+  ready: () => { tone({ f0: 440, f1: 880, dur: 0.09, vol: 0.3 }); tone({ f0: 660, f1: 1320, dur: 0.1, vol: 0.2, delay: 0.06 }); },
+  unready: () => tone({ f0: 520, f1: 240, dur: 0.13, vol: 0.28 }),
+  tick: () => tone({ f0: 880, dur: 0.055, vol: 0.3 }),
+  go: () => { tone({ f0: 523, dur: 0.08, vol: 0.3 }); tone({ f0: 784, dur: 0.1, vol: 0.3, delay: 0.08 }); tone({ f0: 1046, dur: 0.22, vol: 0.32, delay: 0.16 }); },
+  jump: () => tone({ f0: 280, f1: 620, dur: 0.12, vol: 0.22 }),
+  land: () => noise({ dur: 0.07, vol: 0.28, f: 320, q: 0.8 }),
+  step: () => noise({ dur: 0.03, vol: 0.1, f: 750, q: 1.2 }),
+  swing: () => noise({ dur: 0.13, vol: 0.3, f: 2200, sweepTo: 500, q: 2.2 }),
+  clang: () => { tone({ type: 'triangle', f0: 1250, f1: 320, dur: 0.13, vol: 0.4 }); noise({ dur: 0.07, vol: 0.22, f: 3200, q: 1.5 }); },
+  block: () => { tone({ f0: 210, f1: 120, dur: 0.12, vol: 0.34 }); noise({ dur: 0.06, vol: 0.2, f: 850, q: 1 }); },
+  hit: () => { tone({ type: 'sawtooth', f0: 420, f1: 90, dur: 0.2, vol: 0.4 }); noise({ dur: 0.14, vol: 0.26, f: 500, q: 0.8 }); },
+  death: () => { tone({ type: 'sawtooth', f0: 620, f1: 55, dur: 0.5, vol: 0.42 }); noise({ dur: 0.42, vol: 0.28, f: 420, sweepTo: 90, q: 0.7 }); },
+  pickup: () => { tone({ f0: 660, f1: 990, dur: 0.07, vol: 0.28 }); tone({ f0: 990, f1: 1400, dur: 0.09, vol: 0.24, delay: 0.06 }); },
+  drop: () => tone({ f0: 420, f1: 190, dur: 0.11, vol: 0.24 }),
+  heal: () => { tone({ type: 'triangle', f0: 523, dur: 0.09, vol: 0.3 }); tone({ type: 'triangle', f0: 659, dur: 0.09, vol: 0.3, delay: 0.08 }); tone({ type: 'triangle', f0: 784, dur: 0.16, vol: 0.32, delay: 0.16 }); },
+  floorwarn: () => { tone({ f0: 220, dur: 0.14, vol: 0.3 }); tone({ f0: 220, dur: 0.14, vol: 0.3, delay: 0.24 }); },
+  floorred: () => { tone({ type: 'sawtooth', f0: 160, f1: 70, dur: 0.5, vol: 0.32 }); noise({ dur: 0.5, vol: 0.3, f: 220, sweepTo: 70, q: 0.7 }); },
+  nextlevel: () => { tone({ f0: 523, dur: 0.09, vol: 0.3 }); tone({ f0: 659, dur: 0.09, vol: 0.3, delay: 0.09 }); tone({ f0: 784, dur: 0.09, vol: 0.3, delay: 0.18 }); tone({ f0: 1046, dur: 0.2, vol: 0.32, delay: 0.27 }); },
+  gameover: () => { tone({ f0: 392, f1: 370, dur: 0.28, vol: 0.34 }); tone({ f0: 330, dur: 0.28, vol: 0.34, delay: 0.28 }); tone({ f0: 262, f1: 120, dur: 0.6, vol: 0.38, delay: 0.56 }); },
+  bossfire: () => tone({ type: 'sawtooth', f0: 720, f1: 190, dur: 0.16, vol: 0.28 }),
+  reflect: () => tone({ f0: 880, f1: 1760, dur: 0.11, vol: 0.34 }),
+  bosshit: () => { tone({ type: 'sawtooth', f0: 320, f1: 140, dur: 0.16, vol: 0.4 }); noise({ dur: 0.09, vol: 0.24, f: 950, q: 1 }); },
+  bossdead: () => {
+    noise({ dur: 0.8, vol: 0.45, f: 520, sweepTo: 55, q: 0.7 });
+    tone({ type: 'sawtooth', f0: 420, f1: 40, dur: 0.85, vol: 0.38 });
+    tone({ f0: 523, dur: 0.11, vol: 0.3, delay: 0.55 });
+    tone({ f0: 659, dur: 0.11, vol: 0.3, delay: 0.67 });
+    tone({ f0: 784, dur: 0.24, vol: 0.34, delay: 0.79 });
+  },
+  beamcharge: () => tone({ type: 'sine', f0: 560, f1: 1250, dur: 0.35, vol: 0.12 }),
+  beamon: () => { tone({ type: 'sawtooth', f0: 1500, f1: 900, dur: 0.28, vol: 0.28 }); noise({ dur: 0.28, vol: 0.18, f: 2600, q: 3 }); },
+};
+function sfx(name) { try { if (SFX[name]) SFX[name](); } catch {} }
 
 // ---- networking ----
 const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
@@ -43,10 +132,34 @@ ws.onmessage = (e) => {
   for (const pr of m.pr || []) curPos.set('r' + pr.id, { x: pr.x, y: pr.y });
   if (m.bs) curPos.set('boss', { x: m.bs.x, y: m.bs.y });
   lastMsgAt = performance.now();
+  const prev = snap;
   snap = m;
   window.__snap = m; window.__myId = myId;
   for (const ev of m.ev) onEvent(ev);
+  audioCues(prev, m);
 };
+
+// sounds derived from state transitions rather than explicit events
+const seenBeams = new Map(); // beam id -> last known act state
+function audioCues(prev, m) {
+  if (m.ph === 'countdown') {
+    const stage = Math.min(3, Math.floor(3.6 - m.cd));
+    const prevStage = prev && prev.ph === 'countdown' ? Math.min(3, Math.floor(3.6 - prev.cd)) : -1;
+    if (stage !== prevStage) sfx(stage >= 3 ? 'go' : 'tick');
+  }
+  if (prev && prev.ph !== 'gameover' && m.ph === 'gameover') sfx('gameover');
+
+  const alive = new Set();
+  for (const h of m.hz) {
+    if (h.k !== 'beam') continue;
+    alive.add(h.id);
+    const was = seenBeams.get(h.id);
+    if (was === undefined) sfx('beamcharge');
+    if (h.act && was === 0) sfx('beamon');
+    seenBeams.set(h.id, h.act);
+  }
+  for (const id of seenBeams.keys()) if (!alive.has(id)) seenBeams.delete(id);
+}
 
 function send(o) { if (ws.readyState === 1) ws.send(JSON.stringify(o)); }
 
@@ -63,9 +176,22 @@ const KEYMAP = {
 };
 addEventListener('keydown', (e) => {
   const inLobby = !snap || snap.ph === 'lobby' || snap.ph === 'countdown';
-  if (e.key === 'Enter') { send({ t: 'ready' }); e.preventDefault(); return; }
-  if (inLobby && e.key === 'ArrowLeft') { send({ t: 'color', d: -1 }); return; }
-  if (inLobby && e.key === 'ArrowRight') { send({ t: 'color', d: 1 }); return; }
+  if (e.key === 'm' || e.key === 'M') {
+    muted = !muted;
+    if (master) master.gain.value = muted ? 0 : 0.32;
+    return;
+  }
+  if (e.key === 'Enter') {
+    if (inLobby && snap) {
+      const me = snap.pl.find((p) => p.id === myId);
+      sfx(me && me.rdy ? 'unready' : 'ready');
+    }
+    send({ t: 'ready' });
+    e.preventDefault();
+    return;
+  }
+  if (inLobby && e.key === 'ArrowLeft') { sfx('color'); send({ t: 'color', d: -1 }); return; }
+  if (inLobby && e.key === 'ArrowRight') { sfx('color'); send({ t: 'color', d: 1 }); return; }
   const k = KEYMAP[e.key.length === 1 ? e.key.toLowerCase() : e.key];
   if (k) { setIn(k, 1); e.preventDefault(); }
 });
@@ -97,20 +223,23 @@ function burst(x, y, n, color, spd, up) {
 }
 function onEvent(ev) {
   switch (ev.e) {
-    case 'jump': burst(ev.x, ev.y, 6, DUST, 45, true); break;
-    case 'land': burst(ev.x, ev.y, 8, DUST, 55, true); break;
-    case 'clang': burst(ev.x, ev.y, 10, WHITE, 70); shakeT = 0.12; break;
-    case 'block': burst(ev.x, ev.y, 8, PERI, 60); shakeT = 0.1; break;
-    case 'hit': burst(ev.x, ev.y, 10, RED, 70); shakeT = 0.18; break;
-    case 'death': burst(ev.x, ev.y, 22, PLAYER_COLORS[ev.c] || WHITE, 90); shakeT = 0.3; break;
-    case 'pickup': burst(ev.x, ev.y, 6, PERI, 40, true); break;
-    case 'heal': burst(ev.x, ev.y, 12, GREEN, 55, true); break;
-    case 'drop': burst(ev.x, ev.y, 4, PERI, 30, true); break;
-    case 'floorred': shakeT = 0.2; break;
-    case 'bossfire': burst(ev.x, ev.y, 5, RED, 45); break;
-    case 'reflect': burst(ev.x, ev.y, 9, GREEN, 65); shakeT = 0.1; break;
-    case 'bosshit': burst(ev.x, ev.y, 12, GREEN, 75); shakeT = 0.15; break;
-    case 'bossdead': burst(ev.x, ev.y, 40, RED, 110); burst(ev.x, ev.y, 20, WHITE, 80); shakeT = 0.5; break;
+    case 'jump': burst(ev.x, ev.y, 6, DUST, 45, true); sfx('jump'); break;
+    case 'land': burst(ev.x, ev.y, 8, DUST, 55, true); sfx('land'); break;
+    case 'swing': sfx('swing'); break;
+    case 'clang': burst(ev.x, ev.y, 10, WHITE, 70); shakeT = 0.12; sfx('clang'); break;
+    case 'block': burst(ev.x, ev.y, 8, PERI, 60); shakeT = 0.1; sfx('block'); break;
+    case 'hit': burst(ev.x, ev.y, 10, RED, 70); shakeT = 0.18; sfx('hit'); break;
+    case 'death': burst(ev.x, ev.y, 22, PLAYER_COLORS[ev.c] || WHITE, 90); shakeT = 0.3; sfx('death'); break;
+    case 'pickup': burst(ev.x, ev.y, 6, PERI, 40, true); sfx('pickup'); break;
+    case 'heal': burst(ev.x, ev.y, 12, GREEN, 55, true); sfx('heal'); break;
+    case 'drop': burst(ev.x, ev.y, 4, PERI, 30, true); sfx('drop'); break;
+    case 'floorwarn': sfx('floorwarn'); break;
+    case 'floorred': shakeT = 0.2; sfx('floorred'); break;
+    case 'nextlevel': sfx('nextlevel'); break;
+    case 'bossfire': burst(ev.x, ev.y, 5, RED, 45); sfx('bossfire'); break;
+    case 'reflect': burst(ev.x, ev.y, 9, GREEN, 65); shakeT = 0.1; sfx('reflect'); break;
+    case 'bosshit': burst(ev.x, ev.y, 12, GREEN, 75); shakeT = 0.15; sfx('bosshit'); break;
+    case 'bossdead': burst(ev.x, ev.y, 40, RED, 110); burst(ev.x, ev.y, 20, WHITE, 80); shakeT = 0.5; sfx('bossdead'); break;
   }
 }
 
@@ -234,9 +363,9 @@ function drawPlayer(p, x, y, t) {
   const air = !p.og;
 
   // head
-  disc(cx, y + 3.5, 3.5, c);
+  disc(cx, y + 3, 2.5, c);
   // torso
-  stroke(cx, y + 7, cx, y + 12, c, 3);
+  stroke(cx, y + 6, cx, y + 12, c, 3);
 
   // legs
   const hip = y + 12;
@@ -518,10 +647,12 @@ function drawGame(s, t) {
     drawProjectile(pr, pos.x, pos.y, t);
   }
 
+  let anyoneRunning = false;
   for (const p of s.pl) {
     if (!p.ig || !p.al) continue;
     const pos = lerpPos('p' + p.id, p);
     drawPlayer(p, pos.x, pos.y, t);
+    if (p.og && Math.abs(p.vx) > 5) anyoneRunning = true;
     // run dust
     if (p.og && Math.abs(p.vx) > 5 && Math.random() < 0.35) {
       particles.push({
@@ -533,6 +664,9 @@ function drawGame(s, t) {
       });
     }
   }
+
+  // soft footsteps while anyone runs
+  if (anyoneRunning && t - lastStepAt > 0.22) { sfx('step'); lastStepAt = t; }
 
   // HUD
   if (s.ph === 'playing') {

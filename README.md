@@ -25,6 +25,7 @@ Set a different port with `PORT=3210 npm start` if 3000 is taken.
 - Down (or S): drop through a yellow platform you're standing on
 - F or left mouse click: pick up a powerup you're standing on; otherwise swing sword / raise shield
 - E or right mouse click: drop the powerup you hold
+- M: mute / unmute sound effects
 
 Dodge the red hazards until the timer runs out to reach the next generated level.
 Triangles patrol vertically or horizontally, balls roll across the stage, and the
