@@ -45,10 +45,20 @@ fires projectiles at you. Reflect his projectiles back with a sword swing or a
 raised shield — reflected shots turn green and home in on him. Deplete his
 health bar to win the fight.
 
-Beating the boss loops the game back to level 1 on a harder cycle with new
-obstacles: red spikes that scuttle along the ground, and light beams (vertical
-columns or horizontal bars) that fade in from 0 to 100% opacity — their hitbox
-only triggers at full opacity, so dodge out of their line before they solidify.
+Every boss is procedurally generated and never repeats back to back: a random
+name, look, body size, movement style (walker, hopper, flyer, or teleporter),
+attack patterns (aimed shots, spread bursts, radial rings, or rain from above),
+and stats.
+
+Beating the boss loops the game back to level 1 on a harder cycle with a
+randomly rolled obstacle set drawn from: ground-scuttling spikes, light beams
+that fade in from 0 to 100% opacity (hitbox triggers only at full opacity),
+bounding balls, ricocheting zigzag triangles, homing chasers, and shard rain.
+Each cycle also rolls its own game speed, and new powerups join the loot pool:
+
+- Boots: double jump (passive while held)
+- Bow: F fires arrows that damage the boss and knock hazards around
+- Bomb: F detonates a shockwave that shoves hazards away and reflects projectiles (short cooldown)
 
 **Powerups**
 - Sword: swinging it at a hazard flips its orientation (horizontal movers become vertical and vice versa; balls are knocked back)

@@ -34,6 +34,18 @@ export class Room {
     this.floorT = 0;
     this.spawnT = 0;
     this.events = [];
+    this.cycleKinds = ['tri', 'tri', 'ball']; // spawn table, regenerated each cycle
+    this.speedMul = 1;
+    this.lastBossSig = '';
+  }
+
+  // each new cycle rolls a fresh obstacle set and tempo
+  generateCycleMods() {
+    const pool = ['spike', 'beam', 'bouncer', 'zigzag', 'chaser', 'rain'];
+    pool.sort(() => Math.random() - 0.5);
+    const picks = pool.slice(0, 2 + Math.floor(rand(2))); // 2-3 new archetypes
+    this.cycleKinds = ['tri', 'ball', ...picks, ...picks]; // new kinds weighted heavier
+    this.speedMul = 0.9 + rand(0.4);
   }
 
   // ---- connection handling ----
@@ -55,6 +67,7 @@ export class Room {
       x: 0, y: 0, vx: 0, vy: 0, facing: 1,
       onGround: false, groundKind: null, wasGround: false,
       power: null, swingT: 0, swingCd: 0, swingHits: null, shield: false,
+      bowCd: 0, bombCd: 0, airJumps: 0,
       invulnT: 0, hurtT: 0,
       in: { l: 0, r: 0, u: 0, d: 0, j: 0, use: 0, inter: 0 },
       edge: { u: false, j: false, use: false, inter: false },
@@ -116,6 +129,8 @@ export class Room {
   startGame() {
     this.level = Number(process.env.START_LEVEL) || 1; // dev overrides for testing
     this.cycle = Number(process.env.START_CYCLE) || 1;
+    if (this.cycle >= 2) this.generateCycleMods();
+    else { this.cycleKinds = ['tri', 'tri', 'ball']; this.speedMul = 1; }
     for (const p of this.players.values()) {
       p.inGame = true; p.alive = true; p.hp = 3;
       p.power = null; p.shield = false; p.swingT = 0;
@@ -152,12 +167,15 @@ export class Room {
       });
     }
 
-    // powerups on the floor
+    // powerups on the floor (new gear joins the pool after the first boss falls)
+    const pool = this.cycle >= 2
+      ? ['sword', 'shield', 'boots', 'bow', 'bomb']
+      : ['sword', 'shield'];
     const puCount = 1 + (rand() < 0.55 ? 1 : 0);
     for (let i = 0; i < puCount; i++) {
       this.powerups.push({
         id: this.nextEnt++,
-        kind: rand() < 0.5 ? 'sword' : 'shield',
+        kind: pool[Math.floor(rand(pool.length))],
         x: Math.floor(STAGE_L + 20 + rand(STAGE_R - STAGE_L - 50)),
         y: FLOOR_Y - 9, vy: 0,
       });
@@ -189,15 +207,48 @@ export class Room {
     if (this.level === 5) this.setupBoss();
   }
 
+  bossName() {
+    const first = ['GOR', 'MAW', 'ZED', 'KRUL', 'VEX', 'THAR', 'BLIG', 'NOX', 'RUM', 'SKAR', 'GRIM', 'FUM'];
+    const second = ['GON', 'NAX', 'ROTH', 'ZIL', 'DUR', 'BLAT', 'KOR', 'MIR', 'THUD', 'GUS'];
+    const title = ['THE MOLTEN', 'THE HOLLOW', 'THE SWIFT', 'THE BRUTE', 'THE WICKED', 'THE PALE', 'THE LOUD', 'THE SLY', 'THE HUNGRY', 'THE UNWISE'];
+    return first[Math.floor(rand(first.length))] + second[Math.floor(rand(second.length))] +
+      ' ' + title[Math.floor(rand(title.length))];
+  }
+
   setupBoss() {
     this.timer = 9999; // the boss level ends by defeating the boss, not by timer
+
+    // roll movement style + attack patterns; never repeat the previous combo
+    const MOVES = ['walker', 'hopper', 'flyer', 'teleporter'];
+    const ATTACKS = ['aimed', 'burst', 'ring', 'rain'];
+    let move, attacks, sig;
+    do {
+      move = MOVES[Math.floor(rand(MOVES.length))];
+      attacks = [ATTACKS[Math.floor(rand(ATTACKS.length))]];
+      if (rand() < 0.5) {
+        const extra = ATTACKS[Math.floor(rand(ATTACKS.length))];
+        if (!attacks.includes(extra)) attacks.push(extra);
+      }
+      sig = move + '|' + attacks.slice().sort().join(',');
+    } while (sig === this.lastBossSig);
+    this.lastBossSig = sig;
+
     const n = Math.max(1, [...this.players.values()].filter((p) => p.inGame).length);
-    const hp = Number(process.env.BOSS_HP) || 10 + (n - 1) * 3 + (this.cycle - 1) * 4;
+    const hp = Number(process.env.BOSS_HP) ||
+      9 + Math.floor(rand(5)) + (n - 1) * 3 + (this.cycle - 1) * 4;
+    const size = 24 + Math.floor(rand(14));
     this.boss = {
-      x: W / 2 - 14, y: -70, w: 28, h: 26,
+      x: W / 2 - size / 2, y: -70, w: size + 2, h: size,
       hp, maxHp: hp, vx: 0, vy: 0, onGround: false, facing: -1,
-      dirT: 1.2, jumpT: 2.5, fireT: 2.8, hurtT: 0,
+      move, attacks, atkIdx: 0,
+      name: this.bossName(), vr: Math.floor(rand(1e6)), t: 0,
+      spd: 0.8 + rand(0.7),            // movement speed multiplier
+      frate: 0.75 + rand(0.55),        // fire-rate multiplier (lower = faster)
+      pspd: 85 + rand(45) + (this.cycle - 1) * 12, // projectile speed
+      hover: 84 + rand(56),            // flyer altitude
+      dirT: 1.2, jumpT: 2.2, fireT: 2.6, tpT: 2.2, hurtT: 0,
     };
+
     // reflecting requires gear: guarantee both a sword and a shield on the floor
     const kinds = this.powerups.map((pu) => pu.kind);
     for (const need of ['sword', 'shield']) {
@@ -234,6 +285,8 @@ export class Room {
       p.swingCd = Math.max(0, p.swingCd - dt);
       p.invulnT = Math.max(0, p.invulnT - dt);
       p.hurtT = Math.max(0, p.hurtT - dt);
+      p.bowCd = Math.max(0, p.bowCd - dt);
+      p.bombCd = Math.max(0, p.bombCd - dt);
     }
 
     switch (this.phase) {
@@ -254,11 +307,11 @@ export class Room {
         this.simPlayers(dt);
         if (this.level === 5) {
           this.simBoss(dt);
-          this.simProjectiles(dt);
         } else {
           this.simHazards(dt);
           this.simFloor(dt);
         }
+        this.simProjectiles(dt); // arrows fly on every level
         this.simPowerups(dt);
         this.checkCollisions();
 
@@ -274,6 +327,7 @@ export class Room {
           if (this.victoryT <= 0) {
             this.cycle++;
             this.level = 1;
+            this.generateCycleMods();
             this.events.push({ e: 'nextlevel' });
             this.startLevel();
           }
@@ -311,10 +365,16 @@ export class Room {
       p.vx = move * RUN;
       if (move) p.facing = move;
 
-      if ((p.edge.j || p.edge.u) && p.onGround) {
-        p.vy = JUMP_V;
-        p.onGround = false;
-        this.events.push({ e: 'jump', x: p.x + PW / 2, y: p.y + PH });
+      if (p.edge.j || p.edge.u) {
+        if (p.onGround) {
+          p.vy = JUMP_V;
+          p.onGround = false;
+          this.events.push({ e: 'jump', x: p.x + PW / 2, y: p.y + PH });
+        } else if (p.power === 'boots' && p.airJumps > 0) {
+          p.airJumps--;
+          p.vy = JUMP_V * 0.92;
+          this.events.push({ e: 'jump', x: p.x + PW / 2, y: p.y + PH });
+        }
       }
 
       p.vy += GRAV * dt;
@@ -340,6 +400,7 @@ export class Room {
           }
         }
       }
+      if (p.onGround) p.airJumps = 1; // boots grant one mid-air jump
       if (!p.wasGround && p.onGround) {
         this.events.push({ e: 'land', x: p.x + PW / 2, y: p.y + PH });
       }
@@ -353,6 +414,16 @@ export class Room {
         } else if (p.power === 'sword' && p.swingCd <= 0) {
           p.swingT = 0.3; p.swingCd = 0.5; p.swingHits = new Set();
           this.events.push({ e: 'swing', id: p.id });
+        } else if (p.power === 'bow' && p.bowCd <= 0) {
+          p.bowCd = 0.7;
+          this.projectiles.push({
+            id: this.nextEnt++, x: p.x + PW / 2 + p.facing * 8, y: p.y + 7,
+            vx: p.facing * 195, vy: 0, friendly: true, arrow: true,
+          });
+          this.events.push({ e: 'arrow', x: p.x + PW / 2, y: p.y + 7 });
+        } else if (p.power === 'bomb' && p.bombCd <= 0) {
+          p.bombCd = 2.5;
+          this.detonate(p);
         }
       }
       p.shield = p.power === 'shield' && !!p.in.use;
@@ -389,10 +460,16 @@ export class Room {
           h.axis = 'h'; h.vy = 0; h.vx = p.facing * s;
           h.x = clamp(h.x, STAGE_L + 2, STAGE_R - h.w - 2);
         }
-      } else { // ball: knocked back
+      } else if (h.kind === 'rain') {
+        h.life = 0; // shards shatter on a sword hit
+      } else if (h.kind === 'zigzag') {
+        h.vx = p.facing * Math.abs(h.vx);
+        h.vy = -Math.abs(h.vy);
+      } else { // ball / spike / bouncer / chaser: knocked back
         h.vx = p.facing * Math.max(Math.abs(h.vx), 60) * 1.15;
+        if (h.kind === 'bouncer' || h.kind === 'chaser') h.vy = -150;
       }
-      h.life = Math.max(h.life, 5);
+      if (h.kind !== 'rain') h.life = Math.max(h.life, 5);
       this.events.push({ e: 'clang', x: h.x + h.w / 2, y: h.y + h.h / 2 });
     }
     // the sword also reflects boss projectiles
@@ -400,6 +477,26 @@ export class Room {
       if (pr.friendly) continue;
       if (aabb(hx, hy, hw, hh, pr.x - 4, pr.y - 4, 8, 8)) this.reflect(pr);
     }
+  }
+
+  // bomb powerup: shockwave that shoves hazards away and reflects projectiles
+  detonate(p) {
+    const cx = p.x + PW / 2, cy = p.y + PH / 2, R = 55;
+    for (const h of this.hazards) {
+      if (h.kind === 'beam') continue;
+      const dx = h.x + h.w / 2 - cx, dy = h.y + h.h / 2 - cy;
+      const d = Math.hypot(dx, dy);
+      if (d > R) continue;
+      if (h.kind === 'rain') { h.life = 0; continue; }
+      const push = 180 * (1 - d / (R + 20));
+      h.vx = (dx / (d || 1)) * Math.max(Math.abs(h.vx), push);
+      if (h.kind !== 'tri' || h.axis !== 'v') h.vy = Math.min(h.vy, -push * 0.5);
+    }
+    for (const pr of this.projectiles) {
+      if (pr.friendly) continue;
+      if (Math.hypot(pr.x - cx, pr.y - cy) <= R) this.reflect(pr);
+    }
+    this.events.push({ e: 'bomb', x: cx, y: cy });
   }
 
   findPowerupOverlap(p) {
@@ -457,42 +554,86 @@ export class Room {
   simBoss(dt) {
     const b = this.boss;
     if (!b) return;
+    b.t += dt;
     b.hurtT = Math.max(0, b.hurtT - dt);
-    b.dirT -= dt; b.jumpT -= dt; b.fireT -= dt;
+    b.dirT -= dt; b.jumpT -= dt; b.fireT -= dt; b.tpT -= dt;
 
-    if (b.dirT <= 0) {
-      b.vx = (rand() < 0.5 ? -1 : 1) * (38 + rand(46));
-      b.dirT = 0.8 + rand(1.5);
-    }
-    if (b.jumpT <= 0 && b.onGround) {
-      b.vy = -(190 + rand(130));
-      b.onGround = false;
-      b.jumpT = 1.4 + rand(2.2);
+    switch (b.move) {
+      case 'walker':
+        if (b.dirT <= 0) { b.vx = (rand() < 0.5 ? -1 : 1) * (38 + rand(46)) * b.spd; b.dirT = 0.8 + rand(1.5); }
+        if (b.jumpT <= 0 && b.onGround) { b.vy = -(190 + rand(130)); b.onGround = false; b.jumpT = 1.4 + rand(2.2); }
+        break;
+      case 'hopper': // stationary until it springs into big hops
+        if (b.onGround) {
+          b.vx = 0;
+          if (b.jumpT <= 0) {
+            b.vy = -(230 + rand(100));
+            b.vx = (rand() < 0.5 ? -1 : 1) * (60 + rand(55)) * b.spd;
+            b.onGround = false;
+            b.jumpT = 0.8 + rand(1.0);
+          }
+        }
+        break;
+      case 'flyer': // hovers on a sine wave, drifts side to side
+        if (b.dirT <= 0) { b.vx = (rand() < 0.5 ? -1 : 1) * (30 + rand(45)) * b.spd; b.dirT = 1.0 + rand(1.6); }
+        break;
+      case 'teleporter': // stands still, then blinks across the stage
+        b.vx = 0;
+        if (b.tpT <= 0 && b.y > 0) {
+          this.events.push({ e: 'bossport', x: b.x + b.w / 2, y: b.y + b.h / 2 });
+          b.x = STAGE_L + 8 + rand(STAGE_R - STAGE_L - 16 - b.w);
+          if (rand() < 0.3) { b.y = FLOOR_Y - b.h - 40 - rand(50); b.vy = 0; }
+          this.events.push({ e: 'bossport', x: b.x + b.w / 2, y: b.y + b.h / 2 });
+          b.tpT = 1.5 + rand(1.7);
+        }
+        break;
     }
 
-    b.vy += GRAV * dt * 0.85;
-    if (b.vy > 420) b.vy = 420;
+    if (b.move === 'flyer' && b.y > -10) {
+      // ease toward hover altitude with a bob
+      const target = b.hover + Math.sin(b.t * 2.2) * 22;
+      b.vy = (target - b.y) * 3;
+    } else {
+      b.vy += GRAV * dt * 0.85;
+      if (b.vy > 420) b.vy = 420;
+    }
+
     b.x = clamp(b.x + b.vx * dt, STAGE_L + 2, STAGE_R - 2 - b.w);
     b.y += b.vy * dt;
-    if (b.y + b.h >= FLOOR_Y) { b.y = FLOOR_Y - b.h; b.vy = 0; b.onGround = true; }
+    if (b.move !== 'flyer' && b.y + b.h >= FLOOR_Y) { b.y = FLOOR_Y - b.h; b.vy = 0; b.onGround = true; }
     if (b.vx) b.facing = b.vx < 0 ? -1 : 1;
 
-    // fire a projectile at a random living player (not while dropping in)
+    // attack patterns cycle through the boss's rolled set (not while dropping in)
     if (b.fireT <= 0 && b.y > 10) {
       const targets = [...this.players.values()].filter((p) => p.inGame && p.alive);
       if (targets.length) {
         const t = targets[Math.floor(rand(targets.length))];
         const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
-        const dx = t.x + PW / 2 - cx, dy = t.y + PH / 2 - cy;
-        const d = Math.hypot(dx, dy) || 1;
-        const sp = 92 + (this.cycle - 1) * 14;
-        this.projectiles.push({
+        const tx = t.x + PW / 2, ty = t.y + PH / 2;
+        const atk = b.attacks[b.atkIdx++ % b.attacks.length];
+        const shoot = (ang, sp) => this.projectiles.push({
           id: this.nextEnt++, x: cx, y: cy,
-          vx: (dx / d) * sp, vy: (dy / d) * sp, friendly: false,
+          vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp, friendly: false,
         });
+        const aimAng = Math.atan2(ty - cy, tx - cx);
+        if (atk === 'aimed') {
+          shoot(aimAng, b.pspd);
+        } else if (atk === 'burst') {
+          for (const off of [-0.32, 0, 0.32]) shoot(aimAng + off, b.pspd);
+        } else if (atk === 'ring') {
+          for (let i = 0; i < 8; i++) shoot((Math.PI * 2 * i) / 8, b.pspd * 0.8);
+        } else if (atk === 'rain') {
+          for (const off of [-32, 0, 32]) {
+            this.projectiles.push({
+              id: this.nextEnt++,
+              x: clamp(tx + off, STAGE_L + 6, STAGE_R - 6), y: -8,
+              vx: 0, vy: b.pspd * 1.05, friendly: false,
+            });
+          }
+        }
         this.events.push({ e: 'bossfire', x: cx, y: cy });
       }
-      b.fireT = Math.max(0.8, 2.1 - (this.cycle - 1) * 0.2) * (0.7 + rand(0.6));
+      b.fireT = Math.max(0.7, 1.9 * b.frate - (this.cycle - 1) * 0.15) * (0.75 + rand(0.5));
     }
   }
 
@@ -507,6 +648,25 @@ export class Room {
         b.hurtT = 0.35;
         this.events.push({ e: 'bosshit', x: pr.x, y: pr.y });
         return false;
+      }
+      // arrows knock hazards around like a sword hit
+      if (pr.arrow) {
+        for (const h of this.hazards) {
+          if (h.kind === 'beam') continue;
+          if (!aabb(pr.x - 3, pr.y - 3, 6, 6, h.x, h.y, h.w, h.h)) continue;
+          const dir = Math.sign(pr.vx) || 1;
+          if (h.kind === 'rain') h.life = 0;
+          else if (h.kind === 'tri') {
+            const s = Math.max(Math.abs(h.vx), Math.abs(h.vy)) || 70;
+            if (h.axis === 'h') { h.axis = 'v'; h.vx = 0; h.vy = -s; }
+            else { h.axis = 'h'; h.vy = 0; h.vx = dir * s; }
+          } else {
+            h.vx = dir * Math.max(Math.abs(h.vx), 70) * 1.1;
+            if (h.kind === 'bouncer' || h.kind === 'chaser') h.vy = -130;
+          }
+          this.events.push({ e: 'clang', x: pr.x, y: pr.y });
+          return false;
+        }
       }
       return true;
     });
@@ -542,72 +702,144 @@ export class Room {
       h.life -= dt;
       h.blockCd = Math.max(0, (h.blockCd || 0) - dt);
       if (h.kind === 'beam') { h.t += dt; continue; } // beams fade in, they don't move
+
+      if (h.kind === 'bouncer') {
+        h.vy += 520 * dt;
+        if (h.y + h.h >= FLOOR_Y && h.vy > 0) { h.y = FLOOR_Y - h.h; h.vy = -(200 + rand(90)); }
+      } else if (h.kind === 'chaser') {
+        // drifts toward the nearest living player
+        let best = null, bd = 1e9;
+        for (const p of this.players.values()) {
+          if (!p.inGame || !p.alive) continue;
+          const d = Math.hypot(p.x - h.x, p.y - h.y);
+          if (d < bd) { bd = d; best = p; }
+        }
+        if (best) {
+          const dx = best.x + PW / 2 - (h.x + h.w / 2), dy = best.y + PH / 2 - (h.y + h.h / 2);
+          const d = Math.hypot(dx, dy) || 1;
+          h.vx += (dx / d) * h.acc * dt;
+          h.vy += (dy / d) * h.acc * dt;
+          const sp = Math.hypot(h.vx, h.vy);
+          if (sp > h.max) { h.vx = (h.vx / sp) * h.max; h.vy = (h.vy / sp) * h.max; }
+        }
+      }
+
       h.x += h.vx * dt;
       h.y += h.vy * dt;
+
       if (h.kind === 'tri' && h.axis === 'v') {
         const minY = 50, maxY = FLOOR_Y - h.h;
         if (h.y < minY) { h.y = minY; h.vy = Math.abs(h.vy); }
         if (h.y > maxY) { h.y = maxY; h.vy = -Math.abs(h.vy); }
-      } else if ((h.kind === 'tri' && h.axis === 'h') || h.kind === 'spike') {
+      } else if ((h.kind === 'tri' && h.axis === 'h') || h.kind === 'spike' || h.kind === 'bouncer') {
         const minX = STAGE_L + 2, maxX = STAGE_R - h.w - 2;
         if (h.x < minX) { h.x = minX; h.vx = Math.abs(h.vx); }
         if (h.x > maxX) { h.x = maxX; h.vx = -Math.abs(h.vx); }
+      } else if (h.kind === 'zigzag') {
+        const minX = STAGE_L + 2, maxX = STAGE_R - h.w - 2;
+        const minY = 46, maxY = FLOOR_Y - h.h;
+        if (h.x < minX) { h.x = minX; h.vx = Math.abs(h.vx); }
+        if (h.x > maxX) { h.x = maxX; h.vx = -Math.abs(h.vx); }
+        if (h.y < minY) { h.y = minY; h.vy = Math.abs(h.vy); }
+        if (h.y > maxY) { h.y = maxY; h.vy = -Math.abs(h.vy); }
       }
     }
     this.hazards = this.hazards.filter((h) => {
       if (h.kind === 'ball') return h.x > STAGE_L - 40 && h.x < STAGE_R + 40 && h.life > 0;
       if (h.kind === 'beam') return h.t < h.charge + h.active;
+      if (h.kind === 'rain') return h.y < FLOOR_Y - 2 && h.life > 0;
       return h.life > 0;
     });
   }
 
   spawnHazard() {
-    const speed = 55 + this.diff() * 7 + rand(35);
-    const r = rand();
+    const speed = (55 + this.diff() * 7 + rand(35)) * this.speedMul;
     const dir = rand() < 0.5 ? 1 : -1;
-    const cyc2 = this.cycle >= 2; // spikes and light beams join the pool after beating the boss
-    if (r < (cyc2 ? 0.28 : 0.42)) { // horizontal triangle
-      this.hazards.push({
-        id: this.nextEnt++, kind: 'tri', axis: 'h',
-        x: dir > 0 ? STAGE_L + 3 : STAGE_R - 16,
-        y: 106 + rand(84), w: 13, h: 13,
-        vx: dir * speed, vy: 0, life: 8 + rand(4), blockCd: 0,
-      });
-    } else if (r < (cyc2 ? 0.52 : 0.75)) { // vertical triangle
-      this.hazards.push({
-        id: this.nextEnt++, kind: 'tri', axis: 'v',
-        x: STAGE_L + 12 + rand(STAGE_R - STAGE_L - 40),
-        y: 52, w: 13, h: 13,
-        vx: 0, vy: speed, life: 8 + rand(4), blockCd: 0,
-      });
-    } else if (!cyc2 || r < 0.70) { // rolling ball
-      this.hazards.push({
-        id: this.nextEnt++, kind: 'ball',
-        x: dir > 0 ? STAGE_L - 20 : STAGE_R + 4,
-        y: FLOOR_Y - 16, w: 16, h: 16,
-        vx: dir * (speed * 1.15), vy: 0, life: 14, blockCd: 0,
-      });
-    } else if (r < 0.85) { // ground spike crawler
-      this.hazards.push({
-        id: this.nextEnt++, kind: 'spike',
-        x: dir > 0 ? STAGE_L + 3 : STAGE_R - 21,
-        y: FLOOR_Y - 9, w: 18, h: 9,
-        vx: dir * speed * 0.85, vy: 0, life: 11 + rand(4), blockCd: 0,
-      });
-    } else { // light beam: fades 0 -> 100% opacity, hitbox only at 100%
-      const vert = rand() < 0.55;
-      const charge = Math.max(1.1, 1.9 - this.diff() * 0.04);
-      this.hazards.push(vert ? {
-        id: this.nextEnt++, kind: 'beam', orient: 'v',
-        x: Math.floor(STAGE_L + 8 + rand(STAGE_R - STAGE_L - 30)), y: 40,
-        w: 13, h: FLOOR_Y - 40,
-        vx: 0, vy: 0, t: 0, charge, active: 0.5, life: 99, blockCd: 0,
-      } : {
-        id: this.nextEnt++, kind: 'beam', orient: 'h',
-        x: STAGE_L + 2, y: Math.floor(96 + rand(96)),
-        w: STAGE_R - STAGE_L - 4, h: 11,
-        vx: 0, vy: 0, t: 0, charge, active: 0.5, life: 99, blockCd: 0,
-      });
+    const kind = this.cycleKinds[Math.floor(rand(this.cycleKinds.length))];
+    const id = this.nextEnt++;
+    switch (kind) {
+      case 'tri':
+        if (rand() < 0.55) {
+          this.hazards.push({
+            id, kind: 'tri', axis: 'h',
+            x: dir > 0 ? STAGE_L + 3 : STAGE_R - 16,
+            y: 106 + rand(84), w: 13, h: 13,
+            vx: dir * speed, vy: 0, life: 8 + rand(4), blockCd: 0,
+          });
+        } else {
+          this.hazards.push({
+            id, kind: 'tri', axis: 'v',
+            x: STAGE_L + 12 + rand(STAGE_R - STAGE_L - 40),
+            y: 52, w: 13, h: 13,
+            vx: 0, vy: speed, life: 8 + rand(4), blockCd: 0,
+          });
+        }
+        break;
+      case 'ball':
+        this.hazards.push({
+          id, kind: 'ball',
+          x: dir > 0 ? STAGE_L - 20 : STAGE_R + 4,
+          y: FLOOR_Y - 16, w: 16, h: 16,
+          vx: dir * (speed * 1.15), vy: 0, life: 14, blockCd: 0,
+        });
+        break;
+      case 'spike':
+        this.hazards.push({
+          id, kind: 'spike',
+          x: dir > 0 ? STAGE_L + 3 : STAGE_R - 21,
+          y: FLOOR_Y - 9, w: 18, h: 9,
+          vx: dir * speed * 0.85, vy: 0, life: 11 + rand(4), blockCd: 0,
+        });
+        break;
+      case 'beam': {
+        const vert = rand() < 0.55;
+        const charge = Math.max(1.1, 1.9 - this.diff() * 0.04);
+        this.hazards.push(vert ? {
+          id, kind: 'beam', orient: 'v',
+          x: Math.floor(STAGE_L + 8 + rand(STAGE_R - STAGE_L - 30)), y: 40,
+          w: 13, h: FLOOR_Y - 40,
+          vx: 0, vy: 0, t: 0, charge, active: 0.5, life: 99, blockCd: 0,
+        } : {
+          id, kind: 'beam', orient: 'h',
+          x: STAGE_L + 2, y: Math.floor(96 + rand(96)),
+          w: STAGE_R - STAGE_L - 4, h: 11,
+          vx: 0, vy: 0, t: 0, charge, active: 0.5, life: 99, blockCd: 0,
+        });
+        break;
+      }
+      case 'bouncer': // heavy ball that bounds across the stage
+        this.hazards.push({
+          id, kind: 'bouncer',
+          x: dir > 0 ? STAGE_L + 3 : STAGE_R - 17,
+          y: 60 + rand(50), w: 14, h: 14,
+          vx: dir * speed * 0.9, vy: 0, life: 11 + rand(4), blockCd: 0,
+        });
+        break;
+      case 'zigzag': // diagonal ricochet triangle
+        this.hazards.push({
+          id, kind: 'zigzag',
+          x: STAGE_L + 20 + rand(STAGE_R - STAGE_L - 52),
+          y: 50, w: 12, h: 12,
+          vx: dir * speed * 0.8, vy: speed * 0.8, life: 9 + rand(4), blockCd: 0,
+        });
+        break;
+      case 'chaser': // slowly homes in on the nearest player
+        this.hazards.push({
+          id, kind: 'chaser',
+          x: dir > 0 ? STAGE_L + 4 : STAGE_R - 16,
+          y: 70 + rand(80), w: 12, h: 12,
+          vx: 0, vy: 0, acc: 120 + this.diff() * 8, max: speed * 0.85,
+          life: 8 + rand(3), blockCd: 0,
+        });
+        break;
+      case 'rain': // shard falling from the sky
+        this.hazards.push({
+          id, kind: 'rain',
+          x: Math.floor(STAGE_L + 8 + rand(STAGE_R - STAGE_L - 20)),
+          y: -12, w: 5, h: 10,
+          vx: (rand() - 0.5) * 30, vy: speed * 1.1, life: 8, blockCd: 0,
+        });
+        break;
     }
   }
 
@@ -694,9 +926,13 @@ export class Room {
           if (p.shield && h.blockCd <= 0) {
             // bounce the hazard away
             const away = Math.sign(h.x + h.w / 2 - (p.x + PW / 2)) || p.facing;
-            if (h.kind === 'ball' || h.axis === 'h') {
+            if (h.kind === 'rain') {
+              h.life = 0; // shards shatter on the shield
+            } else if (h.kind === 'ball' || h.kind === 'spike' || h.kind === 'bouncer' ||
+                       h.kind === 'chaser' || h.kind === 'zigzag' || h.axis === 'h') {
               h.vx = away * Math.max(Math.abs(h.vx), 60);
               h.x += away * 8;
+              if (h.kind === 'zigzag' || h.kind === 'chaser') h.vy = -Math.abs(h.vy || 60);
             } else {
               h.vy = -Math.abs(h.vy || 60);
               h.y -= 8;
@@ -752,9 +988,11 @@ export class Room {
         hp: this.boss.hp, mhp: this.boss.maxHp,
         ht: this.boss.hurtT > 0 ? 1 : 0, f: this.boss.facing,
         vx: Math.round(this.boss.vx), og: this.boss.onGround ? 1 : 0,
+        nm: this.boss.name, vr: this.boss.vr, mv: this.boss.move,
       } : null,
       pr: this.projectiles.map((pr) => ({
-        id: pr.id, x: +pr.x.toFixed(1), y: +pr.y.toFixed(1), fr: pr.friendly ? 1 : 0,
+        id: pr.id, x: +pr.x.toFixed(1), y: +pr.y.toFixed(1),
+        fr: pr.friendly ? 1 : 0, ar: pr.arrow ? 1 : 0,
       })),
       pl: [...this.players.values()].map((p) => ({
         id: p.id, c: p.color, rdy: p.ready ? 1 : 0,

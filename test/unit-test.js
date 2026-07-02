@@ -42,7 +42,8 @@ const plats2 = room.platforms.map((p) => p.x + ',' + p.y).join('|');
 check('new level layout differs', plats1 !== plats2);
 tick(room, Math.ceil(2.7 * 30));
 
-// hazard damage
+// hazard damage (clear random pickups so a stray health can't heal mid-test)
+room.powerups.length = 0;
 a.x = 100; a.y = 100; a.vy = 0; a.invulnT = 0;
 room.hazards.push({ id: 999, kind: 'tri', axis: 'h', x: 100, y: 100, w: 13, h: 13, vx: 60, vy: 0, life: 5, blockCd: 0 });
 tick(room, 1);
@@ -64,6 +65,7 @@ check('blocked hazard bounces away', hz.vx > 0);
 
 // sword flips orientation
 room.hazards.length = 0;
+room.powerups.length = 0; // F would prioritize a pickup over swinging
 b.power = 'sword'; b.in.use = 0; b.x = 100; b.y = FLOOR_Y_() - 18; b.facing = 1;
 const hz2 = { id: 1001, kind: 'tri', axis: 'h', x: 116, y: b.y, w: 13, h: 13, vx: -60, vy: 0, life: 5, blockCd: 0 };
 room.hazards.push(hz2);
@@ -196,6 +198,7 @@ check('survivor hp carries over (no auto-heal)', b.alive && b.hp === 2);
   // shield reflects: projectile turns friendly (green) and heads for the boss
   r3.projectiles.length = 0;
   r3.boss.fireT = 999; // deterministic from here on
+  r3.boss.move = 'walker'; r3.boss.tpT = 999; r3.boss.dirT = 999; r3.boss.jumpT = 999; r3.boss.vx = 0;
   pa.hp = 3; pb.hp = 3; pa.invulnT = 0; pb.invulnT = 0; pa.alive = pb.alive = true;
   pb.x = 210; pb.y = 206 - 18; pb.vy = 0;
   pb.power = 'shield'; pb.in.use = 1;
@@ -209,6 +212,7 @@ check('survivor hp carries over (no auto-heal)', b.alive && b.hp === 2);
   check('no damage taken when reflecting', pb.hp === 3);
 
   // sword reflects too
+  r3.powerups.length = 0; // F would prioritize a pickup over swinging
   pa.power = 'sword'; pa.facing = 1; pa.swingCd = 0;
   const pr2 = { id: 9002, x: pa.x + 18, y: pa.y + 6, vx: -1, vy: 0, friendly: false };
   r3.projectiles.push(pr2);
@@ -244,19 +248,20 @@ check('survivor hp carries over (no auto-heal)', b.alive && b.hp === 2);
   tick(r3, Math.ceil(2.5 * 30));
   check('after victory: cycle 2, level 1', r3.cycle === 2 && r3.level === 1 && r3.phase === 'intro');
 
-  // cycle 2 spawn pool includes spikes and beams
+  // cycle 2 spawns only from its rolled obstacle set, which includes new kinds
   r3.hazards.length = 0;
   for (let i = 0; i < 80; i++) r3.spawnHazard();
   const ks = new Set(r3.hazards.map((h) => h.kind));
-  check('cycle 2 spawns spikes', ks.has('spike'));
-  check('cycle 2 spawns light beams', ks.has('beam'));
+  const rolled = new Set(r3.cycleKinds);
+  check('cycle 2 spawns match the rolled set', [...ks].every((k) => rolled.has(k)));
+  check('cycle 2 includes new archetypes', [...ks].some((k) => k !== 'tri' && k !== 'ball'));
 
-  // cycle 1 never spawns them
+  // cycle 1 sticks to the classics
   const r4 = new Room();
   r4.hazards.length = 0;
   for (let i = 0; i < 80; i++) r4.spawnHazard();
   const ks1 = new Set(r4.hazards.map((h) => h.kind));
-  check('cycle 1 has no spikes or beams', !ks1.has('spike') && !ks1.has('beam'));
+  check('cycle 1 only spawns triangles and balls', [...ks1].every((k) => k === 'tri' || k === 'ball'));
 
   // beam hitbox triggers only at 100% opacity
   r3.phase = 'playing';
@@ -272,6 +277,127 @@ check('survivor hp carries over (no auto-heal)', b.alive && b.hp === 2);
   beam.t = 1.65;
   tick(r3, 1);
   check('fully opaque beam hurts', pa.hp === 2);
+}
+
+// ---- generative cycles, bosses, and new powerups ----
+{
+  // cycle mods roll a fresh obstacle set
+  const r5 = new Room();
+  r5.generateCycleMods();
+  const extras = r5.cycleKinds.filter((k) => k !== 'tri' && k !== 'ball');
+  const validPool = ['spike', 'beam', 'bouncer', 'zigzag', 'chaser', 'rain'];
+  check('cycle mods add 2-3 new archetypes', new Set(extras).size >= 2 && extras.every((k) => validPool.includes(k)));
+  check('cycle speed multiplier in range', r5.speedMul >= 0.9 && r5.speedMul <= 1.3);
+
+  // bosses never repeat the previous move/attack combo
+  const r6 = new Room();
+  r6.addSocket(fakeWs());
+  for (const p of r6.players.values()) p.inGame = true;
+  let repeats = 0, prevSig = null;
+  for (let i = 0; i < 12; i++) {
+    r6.level = 5; r6.startLevel();
+    const sig = r6.lastBossSig;
+    if (sig === prevSig) repeats++;
+    prevSig = sig;
+  }
+  check('12 consecutive bosses never repeat', repeats === 0);
+  const b = r6.boss;
+  check('boss has generated name and variant', typeof b.name === 'string' && b.name.length > 5 && b.vr >= 0);
+  check('boss has movement and attack styles', ['walker', 'hopper', 'flyer', 'teleporter'].includes(b.move) && b.attacks.length >= 1);
+
+  // teleporter/flyer sims run without falling through the world
+  for (const mv of ['walker', 'hopper', 'flyer', 'teleporter']) {
+    r6.level = 5; r6.startLevel();
+    r6.boss.move = mv;
+    r6.phase = 'playing';
+    tick(r6, 90); // 3 seconds
+    const ok = r6.boss === null || (r6.boss.y > -80 && r6.boss.y < 220);
+    check(`boss move '${mv}' stays on stage`, ok);
+  }
+
+  // new hazard behaviors
+  const r7 = new Room();
+  r7.addSocket(fakeWs());
+  const pc = [...r7.players.values()][0];
+  pc.inGame = true; pc.alive = true; pc.x = 120; pc.y = 206 - 18;
+  r7.phase = 'playing'; r7.level = 1; r7.timer = 999; r7.spawnT = 999; r7.floorT = 999;
+
+  const bounce = { id: 1, kind: 'bouncer', x: 100, y: 180, w: 14, h: 14, vx: 30, vy: 100, life: 10, blockCd: 0 };
+  r7.hazards.push(bounce);
+  tick(r7, 20);
+  check('bouncer bounces off the floor', bounce.vy < 0 || bounce.y + bounce.h < 206);
+
+  const chase = { id: 2, kind: 'chaser', x: 40, y: 100, w: 12, h: 12, vx: 0, vy: 0, acc: 130, max: 90, life: 10, blockCd: 0 };
+  r7.hazards.push(chase);
+  pc.invulnT = 999;
+  tick(r7, 15);
+  check('chaser homes toward player', chase.vx > 0 && chase.vy > 0);
+
+  const zig = { id: 3, kind: 'zigzag', x: 230, y: 100, w: 12, h: 12, vx: 100, vy: 80, life: 10, blockCd: 0 };
+  r7.hazards.push(zig);
+  tick(r7, 10);
+  check('zigzag ricochets off the wall', zig.vx < 0);
+
+  // rain shard shatters on sword hit
+  r7.hazards.length = 0;
+  const shard = { id: 4, kind: 'rain', x: pc.x + 14, y: pc.y + 2, w: 5, h: 10, vx: 0, vy: 0.001, life: 8, blockCd: 0 };
+  r7.hazards.push(shard);
+  pc.power = 'sword'; pc.facing = 1; pc.swingCd = 0; pc.invulnT = 999;
+  pc.edge.use = true;
+  tick(r7, 2);
+  check('sword shatters rain shard', !r7.hazards.includes(shard));
+
+  // boots: one extra jump in mid-air
+  pc.power = 'boots'; pc.x = 120; pc.y = 206 - 18; pc.vy = 0;
+  tick(r7, 1);
+  pc.edge.j = true; tick(r7, 3); // ground jump
+  const vyAfterFirst = pc.vy;
+  pc.edge.j = true; tick(r7, 1); // air jump
+  check('boots grant a double jump', pc.vy < 0 && !pc.onGround && vyAfterFirst < 0);
+  tick(r7, 2);
+  const vyBeforeThird = pc.vy;
+  pc.edge.j = true; tick(r7, 1); // should do nothing
+  check('no triple jump', pc.vy >= vyBeforeThird);
+
+  // bow: fires an arrow that can hit the boss
+  const r8 = new Room();
+  r8.addSocket(fakeWs());
+  const pb2 = [...r8.players.values()][0];
+  pb2.inGame = true; pb2.alive = true;
+  r8.level = 5; r8.startLevel();
+  r8.phase = 'playing';
+  r8.powerups.length = 0; // F would prioritize a floor pickup over using the bow
+  r8.boss.fireT = 999; r8.boss.move = 'walker'; r8.boss.vx = 0; r8.boss.dirT = 999; r8.boss.jumpT = 999;
+  r8.boss.x = 160; r8.boss.y = 206 - r8.boss.h;
+  pb2.x = 100; pb2.y = 206 - 18; pb2.facing = 1; pb2.power = 'bow'; pb2.invulnT = 999;
+  const bhp2 = r8.boss.hp;
+  pb2.edge.use = true;
+  tick(r8, 1);
+  check('bow fires a friendly arrow', r8.projectiles.some((pr) => pr.arrow && pr.friendly));
+  tick(r8, 20);
+  check('arrow damages the boss', r8.boss.hp === bhp2 - 1);
+
+  // bomb: shockwave pushes hazards away and reflects projectiles
+  pb2.power = 'bomb'; pb2.bombCd = 0;
+  r8.projectiles.length = 0;
+  r8.projectiles.push({ id: 7000, x: pb2.x + 20, y: pb2.y + 5, vx: -50, vy: 0, friendly: false });
+  const spikeH = { id: 7001, kind: 'spike', x: pb2.x + 24, y: 206 - 9, w: 18, h: 9, vx: -40, vy: 0, life: 8, blockCd: 0 };
+  r8.hazards.push(spikeH);
+  pb2.edge.use = true;
+  tick(r8, 1);
+  check('bomb reflects nearby projectile', r8.projectiles[0].friendly === true);
+  check('bomb shoves nearby hazard away', spikeH.vx > 0);
+
+  // cycle 2 powerup pool includes the new gear
+  const r9 = new Room();
+  r9.cycle = 2; r9.generateCycleMods();
+  const seen = new Set();
+  for (let i = 0; i < 40; i++) { r9.level = 1; r9.startLevel(); for (const pu of r9.powerups) seen.add(pu.kind); }
+  check('cycle 2 spawns new powerups', seen.has('boots') || seen.has('bow') || seen.has('bomb'));
+  const r10 = new Room();
+  const seen1 = new Set();
+  for (let i = 0; i < 40; i++) { r10.level = 1; r10.startLevel(); for (const pu of r10.powerups) seen1.add(pu.kind); }
+  check('cycle 1 keeps the classic pool', !seen1.has('boots') && !seen1.has('bow') && !seen1.has('bomb'));
 }
 
 // 5th connection is spectator

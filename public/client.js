@@ -112,6 +112,9 @@ const SFX = {
     tone({ f0: 784, dur: 0.24, vol: 0.34, delay: 0.79 });
   },
   beamcharge: () => tone({ type: 'sine', f0: 560, f1: 1250, dur: 0.35, vol: 0.12 }),
+  arrow: () => { noise({ dur: 0.07, vol: 0.2, f: 2600, sweepTo: 1200, q: 2 }); tone({ f0: 700, f1: 1100, dur: 0.06, vol: 0.18 }); },
+  bomb: () => { noise({ dur: 0.45, vol: 0.45, f: 400, sweepTo: 60, q: 0.7 }); tone({ type: 'sawtooth', f0: 220, f1: 45, dur: 0.4, vol: 0.35 }); },
+  warp: () => { tone({ type: 'sine', f0: 900, f1: 220, dur: 0.14, vol: 0.24 }); tone({ type: 'sine', f0: 220, f1: 900, dur: 0.14, vol: 0.24, delay: 0.1 }); },
   beamon: () => { tone({ type: 'sawtooth', f0: 1500, f1: 900, dur: 0.28, vol: 0.28 }); noise({ dur: 0.28, vol: 0.18, f: 2600, q: 3 }); },
 };
 function sfx(name) { try { if (SFX[name]) SFX[name](); } catch {} }
@@ -236,6 +239,9 @@ function onEvent(ev) {
     case 'floorwarn': sfx('floorwarn'); break;
     case 'floorred': shakeT = 0.2; sfx('floorred'); break;
     case 'nextlevel': sfx('nextlevel'); break;
+    case 'arrow': burst(ev.x, ev.y, 4, PERI, 35); sfx('arrow'); break;
+    case 'bomb': burst(ev.x, ev.y, 26, '#f2e59e', 100); burst(ev.x, ev.y, 12, WHITE, 60); shakeT = 0.3; sfx('bomb'); break;
+    case 'bossport': burst(ev.x, ev.y, 12, DARKRED, 55); sfx('warp'); break;
     case 'bossfire': burst(ev.x, ev.y, 5, RED, 45); sfx('bossfire'); break;
     case 'reflect': burst(ev.x, ev.y, 9, GREEN, 65); shakeT = 0.1; sfx('reflect'); break;
     case 'bosshit': burst(ev.x, ev.y, 12, GREEN, 75); shakeT = 0.15; sfx('bosshit'); break;
@@ -345,6 +351,22 @@ function drawHealthIcon(x, y, t) {
   else px(x - 5, y + 3, 1, 1, '#aef7c2');
 }
 
+function drawBootsIcon(x, y) {
+  px(x - 4, y - 2, 3, 4, PERI); px(x - 5, y + 2, 4, 2, PERI);
+  px(x + 1, y - 2, 3, 4, PERI); px(x, y + 2, 4, 2, PERI);
+}
+function drawBowIcon(x, y, f = 1) {
+  // curved limb + string
+  stroke(x - 1 * f, y - 5, x + 2 * f, y, PERI, 2);
+  stroke(x + 2 * f, y, x - 1 * f, y + 5, PERI, 2);
+  stroke(x - 1 * f, y - 5, x - 1 * f, y + 5, '#7d8ac2', 1);
+}
+function drawBombIcon(x, y, t) {
+  disc(x, y + 1, 3, '#555');
+  px(x - 1, y + 1, 1, 1, '#888');
+  stroke(x + 1, y - 2, x + 3, y - 5, '#8a7',  1);
+  if (Math.floor(t * 8) % 2 === 0) px(x + 3, y - 6, 2, 2, '#f2e59e');
+}
 function drawShieldIcon(x, y, big = false) {
   const rw = big ? 3 : 2, rh = big ? 5 : 4;
   for (let dy = -rh; dy <= rh; dy++)
@@ -411,9 +433,12 @@ function drawPlayer(p, x, y, t) {
     stroke(cx, sh, cx + 4, sh + 4, c, 2);
   }
 
-  // held (not active) powerup indicator on back
+  // held (not active) powerup indicator on back / feet
   if (p.pw === 'sword' && p.sw <= 0) drawSwordIcon(cx - 5 * p.f, y + 10, -Math.PI / 2 - 0.5 * p.f);
   if (p.pw === 'shield' && !p.sh) drawShieldIcon(cx - 5 * p.f, y + 9);
+  if (p.pw === 'boots') drawBootsIcon(cx, y + PH - 2);
+  if (p.pw === 'bow') drawBowIcon(cx + 5 * p.f, y + 8, p.f);
+  if (p.pw === 'bomb') drawBombIcon(cx - 5 * p.f, y + 8, t);
 
   // hp dots when recently hurt
   if (p.ht > 0 && p.al) {
@@ -469,31 +494,62 @@ function drawBoss(b, x, y, t) {
   const flash = b.ht && Math.floor(t * 16) % 2 === 0;
   const body = flash ? WHITE : RED;
   const cx = x + b.w / 2, cy = y + b.h / 2;
-  // hulking blob body
-  disc(cx, cy + 2, 11, body);
-  disc(cx - 6, cy - 5, 7, body);
-  disc(cx + 6, cy - 5, 7, body);
-  // horns
-  stroke(cx - 9, cy - 10, cx - 12, cy - 16, body, 3);
-  stroke(cx + 9, cy - 10, cx + 12, cy - 16, body, 3);
-  // stubby feet
-  px(cx - 9, y + b.h - 3, 5, 3, body);
-  px(cx + 4, y + b.h - 3, 5, 3, body);
+  const seed = b.vr || 1;
+  const R = Math.floor(b.h * 0.42);
+
+  // flyer wings flap behind the body
+  if (b.mv === 'flyer') {
+    const flap = Math.sin(t * 12) * 5;
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.moveTo(cx - R, cy - 2); ctx.lineTo(cx - R - 10, cy - 8 - flap); ctx.lineTo(cx - R - 2, cy + 4);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(cx + R, cy - 2); ctx.lineTo(cx + R + 10, cy - 8 - flap); ctx.lineTo(cx + R + 2, cy + 4);
+    ctx.closePath(); ctx.fill();
+  }
+  // teleporter shimmer outline
+  if (b.mv === 'teleporter' && Math.floor(t * 10) % 3 === 0) {
+    disc(cx, cy + 1, R + 4, DARKRED);
+  }
+
+  // hulking blob body, lumps positioned by the variant seed
+  disc(cx, cy + 2, R, body);
+  disc(cx - Math.round(R * 0.55), cy - Math.round(R * 0.4) + Math.round(wob(seed, 1) * 2), Math.round(R * 0.62), body);
+  disc(cx + Math.round(R * 0.55), cy - Math.round(R * 0.4) + Math.round(wob(seed, 2) * 2), Math.round(R * 0.62), body);
+
+  // 1-3 horns depending on variant
+  const horns = 1 + (Math.abs(Math.floor(wob(seed, 3) * 10)) % 3);
+  for (let i = 0; i < horns; i++) {
+    const hx = cx + (i - (horns - 1) / 2) * Math.round(R * 0.8);
+    const lean = wob(seed, 4 + i) * 4;
+    stroke(hx, cy - R, hx + lean, cy - R - 6 - Math.abs(wob(seed, 7 + i)) * 4, body, 3);
+  }
+  // stubby feet (not for flyers)
+  if (b.mv !== 'flyer') {
+    px(cx - Math.round(R * 0.8), y + b.h - 3, 5, 3, body);
+    px(cx + Math.round(R * 0.8) - 4, y + b.h - 3, 5, 3, body);
+  }
   if (!flash) {
-    // angry eyes track facing
+    // angry eyes track facing; size from variant
+    const ew = 2 + (Math.abs(Math.floor(wob(seed, 9) * 10)) % 3);
     const ex = b.f * 2;
-    px(cx - 6 + ex, cy - 6, 3, 4, '#000');
-    px(cx + 3 + ex, cy - 6, 3, 4, '#000');
+    px(cx - 6 + ex, cy - 6, ew, ew + 1, '#000');
+    px(cx + 5 - ew + ex, cy - 6, ew, ew + 1, '#000');
     stroke(cx - 8 + ex, cy - 9, cx - 3 + ex, cy - 7, '#000', 2);
     stroke(cx + 6 + ex, cy - 7, cx + 11 + ex, cy - 9, '#000', 2);
-    // jagged mouth
-    for (let i = 0; i < 4; i++) px(cx - 6 + i * 3, cy + 3 + (i % 2), 3, 2, DARKRED);
+    // mouth style from variant
+    if (wob(seed, 11) > 0) {
+      for (let i = 0; i < 4; i++) px(cx - 6 + i * 3, cy + 3 + (i % 2), 3, 2, DARKRED);
+    } else {
+      stroke(cx - 5, cy + 4, cx + 5, cy + 4 + wob(seed, 12) * 2, DARKRED, 2);
+    }
   }
 }
 
 function drawBossBar(bs, t) {
-  const bw = 110, bx = W / 2 - bw / 2, by = 10;
-  drawTextC('BOSS', W / 2, by - 8, 1, RED, 21);
+  const bw = 110, bx = W / 2 - bw / 2, by = 14;
+  drawTextC(bs.nm || 'BOSS', W / 2, by - 10, 1, RED, 21);
   wobblyLine(bx - 2, by, bx + bw + 2, by, WHITE, 2, 31, 0.6);
   wobblyLine(bx - 2, by + 9, bx + bw + 2, by + 9, WHITE, 2, 32, 0.6);
   stroke(bx - 2, by, bx - 2, by + 9, WHITE, 2);
@@ -503,6 +559,12 @@ function drawBossBar(bs, t) {
 }
 
 function drawProjectile(pr, x, y, t) {
+  if (pr.ar) {
+    // player arrow: short bolt with a bright tip
+    px(x - 4, y - 1, 8, 2, PERI);
+    px(x + 3, y - 1, 2, 2, WHITE);
+    return;
+  }
   const c = pr.fr ? GREEN : RED;
   disc(x, y, 3, c);
   // crackle
@@ -526,6 +588,40 @@ function drawSpike(h, x, y, t) {
   px(back + (h.vx > 0 ? -4 : 4), y + h.h - 2, 3, 2, DARKRED);
 }
 
+function drawBouncer(h, x, y, t) {
+  disc(x + h.w / 2, y + h.h / 2, h.w / 2, RED);
+  // squash marks under it
+  px(x + 1, y + h.h - 1, h.w - 2, 1, DARKRED);
+  const a = t * 7 + h.id;
+  px(x + h.w / 2 + Math.cos(a) * 3 - 1, y + h.h / 2 + Math.sin(a) * 3 - 1, 2, 2, DARKRED);
+}
+function drawZigzag(h, x, y) {
+  // triangle pointing along dominant velocity
+  const cx = x + h.w / 2, cy = y + h.h / 2, s = h.w / 2;
+  const ang = Math.atan2(h.vy, h.vx);
+  ctx.fillStyle = RED;
+  ctx.beginPath();
+  ctx.moveTo(cx + Math.cos(ang) * s * 1.3, cy + Math.sin(ang) * s * 1.3);
+  ctx.lineTo(cx + Math.cos(ang + 2.5) * s, cy + Math.sin(ang + 2.5) * s);
+  ctx.lineTo(cx + Math.cos(ang - 2.5) * s, cy + Math.sin(ang - 2.5) * s);
+  ctx.closePath(); ctx.fill();
+  px(cx - Math.cos(ang) * s * 1.6, cy - Math.sin(ang) * s * 1.6, 2, 2, DARKRED);
+}
+function drawChaser(h, x, y, t) {
+  const cx = x + h.w / 2, cy = y + h.h / 2;
+  disc(cx, cy, 4, RED);
+  // rotating spikes
+  for (let i = 0; i < 4; i++) {
+    const a = t * 4 + (Math.PI / 2) * i;
+    stroke(cx + Math.cos(a) * 4, cy + Math.sin(a) * 4, cx + Math.cos(a) * 7, cy + Math.sin(a) * 7, RED, 2);
+  }
+  px(cx - 1, cy - 1, 2, 2, DARKRED); // pupil: it is watching you
+}
+function drawRain(h, x, y) {
+  px(x + 1, y, 3, h.h - 3, RED);
+  px(x, y + h.h - 4, 5, 2, RED);
+  px(x + 2, y - 4, 1, 3, DARKRED);
+}
 function drawBeam(h, t) {
   const charging = !h.act;
   const alpha = charging ? 0.08 + h.a * 0.55 : 1;
@@ -628,6 +724,9 @@ function drawGame(s, t) {
     if (pu.k === 'sword') drawSwordIcon(pu.x, pu.y + 4 + bob, -Math.PI / 2);
     else if (pu.k === 'shield') drawShieldIcon(pu.x, pu.y + 3 + bob, true);
     else if (pu.k === 'health') drawHealthIcon(pu.x, pu.y + bob, t + pu.id);
+    else if (pu.k === 'boots') drawBootsIcon(pu.x, pu.y + 4 + bob);
+    else if (pu.k === 'bow') drawBowIcon(pu.x, pu.y + 4 + bob);
+    else if (pu.k === 'bomb') drawBombIcon(pu.x, pu.y + 4 + bob, t);
   }
 
   for (const h of s.hz) {
@@ -635,6 +734,10 @@ function drawGame(s, t) {
     const pos = lerpPos('h' + h.id, h);
     if (h.k === 'tri') drawTriangle(h, pos.x, pos.y, t);
     else if (h.k === 'spike') drawSpike(h, pos.x, pos.y, t);
+    else if (h.k === 'bouncer') drawBouncer(h, pos.x, pos.y, t);
+    else if (h.k === 'zigzag') drawZigzag(h, pos.x, pos.y);
+    else if (h.k === 'chaser') drawChaser(h, pos.x, pos.y, t);
+    else if (h.k === 'rain') drawRain(h, pos.x, pos.y);
     else drawBall(h, pos.x, pos.y, t);
   }
 
