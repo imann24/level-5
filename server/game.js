@@ -107,7 +107,7 @@ export class Room {
   // ---- phase control ----
 
   startGame() {
-    this.level = 1;
+    this.level = Number(process.env.START_LEVEL) || 1; // dev override for testing later levels
     for (const p of this.players.values()) {
       p.inGame = true; p.alive = true; p.hp = 3;
       p.power = null; p.shield = false; p.swingT = 0;
@@ -152,13 +152,27 @@ export class Room {
       });
     }
 
-    // drop players from the sky
-    const alive = [...this.players.values()].filter((p) => p.inGame && p.alive);
-    alive.forEach((p, i) => {
+    // floating health pickups from level 2 onward (no auto-healing between levels)
+    if (this.level >= 2) {
+      const n = 1 + (rand() < 0.5 ? 1 : 0);
+      for (let i = 0; i < n; i++) {
+        this.powerups.push({
+          id: this.nextEnt++, kind: 'health', float: true,
+          x: Math.floor(STAGE_L + 24 + rand(STAGE_R - STAGE_L - 48)),
+          y: 110 + Math.floor(rand(70)), vy: 0,
+        });
+      }
+    }
+
+    // respawn anyone who died last level, then drop everyone from the sky
+    const drops = [...this.players.values()].filter((p) => p.inGame);
+    drops.forEach((p, i) => {
+      if (!p.alive) { p.alive = true; p.hp = 3; p.power = null; p.shield = false; }
       const span = STAGE_R - STAGE_L - 60;
-      p.x = STAGE_L + 30 + (alive.length > 1 ? (span * i) / (alive.length - 1) : span / 2);
+      p.x = STAGE_L + 30 + (drops.length > 1 ? (span * i) / (drops.length - 1) : span / 2);
       p.y = -30 - i * 14;
       p.vx = 0; p.vy = 0; p.onGround = false;
+      p.invulnT = 0; p.hurtT = 0; p.swingT = 0;
     });
   }
 
@@ -254,7 +268,7 @@ export class Room {
         const bottom = p.y + PH;
         if (prevBottom <= FLOOR_Y + 0.01 && bottom >= FLOOR_Y) {
           p.y = FLOOR_Y - PH; p.vy = 0; p.onGround = true; p.groundKind = 'floor';
-        } else {
+        } else if (!p.in.d) { // holding down drops through platforms
           for (const pl of this.platforms) {
             if (p.x + PW > pl.x && p.x < pl.x + pl.w &&
                 prevBottom <= pl.y + 0.01 && bottom >= pl.y) {
@@ -269,24 +283,36 @@ export class Room {
       }
       if (p.y > H + 60) { p.y = -30; p.vy = 0; } // safety net
 
-      // sword swing (press) / shield raise (held)
-      if (p.edge.use && p.power === 'sword' && p.swingCd <= 0) {
-        p.swingT = 0.3; p.swingCd = 0.5; p.swingHits = new Set();
-        this.events.push({ e: 'swing', id: p.id });
+      // F / left click: pick up when overlapping a powerup, otherwise use held item
+      if (p.edge.use) {
+        const target = this.findPowerupOverlap(p);
+        if (target) {
+          this.pickUp(p, target);
+        } else if (p.power === 'sword' && p.swingCd <= 0) {
+          p.swingT = 0.3; p.swingCd = 0.5; p.swingHits = new Set();
+          this.events.push({ e: 'swing', id: p.id });
+        }
       }
       p.shield = p.power === 'shield' && !!p.in.use;
 
       if (p.swingT > 0.03 && p.swingT < 0.27 && p.power === 'sword') this.doSwing(p);
 
-      if (p.edge.inter) this.tryInteract(p);
+      // E / right click: drop the held powerup
+      if (p.edge.inter && p.power) {
+        this.dropPowerup(p);
+        this.events.push({ e: 'drop', x: p.x + PW / 2, y: p.y + PH });
+      }
 
       p.edge.j = p.edge.u = p.edge.use = p.edge.inter = false;
     }
   }
 
   doSwing(p) {
-    const hx = p.facing > 0 ? p.x + PW - 3 : p.x - 21;
-    const hy = p.y - 15, hw = 24, hh = PH + 20;
+    // tight box matching the visible blade arc: in front of the player,
+    // from just above the head down to the feet
+    const reach = 13;
+    const hx = p.facing > 0 ? p.x + PW - 2 : p.x + 2 - reach;
+    const hy = p.y - 8, hw = reach, hh = PH + 8;
     for (const h of this.hazards) {
       if (p.swingHits.has(h.id)) continue;
       if (!aabb(hx, hy, hw, hh, h.x, h.y, h.w, h.h)) continue;
@@ -308,25 +334,24 @@ export class Room {
     }
   }
 
-  tryInteract(p) {
-    let target = null;
+  findPowerupOverlap(p) {
     for (const pu of this.powerups) {
-      if (aabb(p.x - 4, p.y - 4, PW + 8, PH + 8, pu.x - 4, pu.y - 4, 8, 9)) { target = pu; break; }
+      if (pu.kind === 'health') continue; // health is collected automatically
+      if (aabb(p.x - 4, p.y - 4, PW + 8, PH + 8, pu.x - 4, pu.y - 4, 8, 9)) return pu;
     }
-    if (target) {
-      if (p.power) {
-        const old = p.power;
-        p.power = target.kind;
-        target.kind = old; // swap in place
-      } else {
-        p.power = target.kind;
-        this.powerups = this.powerups.filter((q) => q !== target);
-      }
-      this.events.push({ e: 'pickup', x: p.x + PW / 2, y: p.y });
-    } else if (p.power) {
-      this.dropPowerup(p);
-      this.events.push({ e: 'drop', x: p.x + PW / 2, y: p.y + PH });
+    return null;
+  }
+
+  pickUp(p, target) {
+    if (p.power) {
+      const old = p.power;
+      p.power = target.kind;
+      target.kind = old; // swap in place
+    } else {
+      p.power = target.kind;
+      this.powerups = this.powerups.filter((q) => q !== target);
     }
+    this.events.push({ e: 'pickup', x: p.x + PW / 2, y: p.y });
   }
 
   dropPowerup(p) {
@@ -341,6 +366,7 @@ export class Room {
 
   simPowerups(dt) {
     for (const pu of this.powerups) {
+      if (pu.float) continue; // health pickups hover in place
       // dropped powerups fall to the floor / a platform
       let landed = pu.y >= FLOOR_Y - 9;
       if (!landed) {
@@ -456,6 +482,19 @@ export class Room {
     for (const p of this.players.values()) {
       if (!p.inGame || !p.alive) continue;
 
+      // touching a health pickup heals one dot (only when hurt)
+      if (p.hp < 3) {
+        for (const pu of this.powerups) {
+          if (pu.kind !== 'health') continue;
+          if (!aabb(p.x - 2, p.y - 2, PW + 4, PH + 4, pu.x - 5, pu.y - 5, 10, 10)) continue;
+          p.hp++;
+          p.hurtT = 2.2; // show the dots so the heal is visible
+          this.powerups = this.powerups.filter((q) => q !== pu);
+          this.events.push({ e: 'heal', x: p.x + PW / 2, y: p.y });
+          break;
+        }
+      }
+
       if (p.invulnT <= 0) {
         for (const h of this.hazards) {
           if (!aabb(p.x, p.y, PW, PH, h.x + 2, h.y + 2, h.w - 4, h.h - 4)) continue;
@@ -526,7 +565,7 @@ export class Room {
         vx: Math.round(h.vx), vy: Math.round(h.vy), w: h.w, h: h.h,
       })),
       pf: this.platforms.map((pl) => ({ id: pl.id, x: pl.x, y: pl.y, w: pl.w, h: pl.h })),
-      pu: this.powerups.map((pu) => ({ id: pu.id, k: pu.kind, x: Math.round(pu.x), y: Math.round(pu.y) })),
+      pu: this.powerups.map((pu) => ({ id: pu.id, k: pu.kind, x: Math.round(pu.x), y: Math.round(pu.y), fl: pu.float ? 1 : 0 })),
       ev: this.events,
     };
   }

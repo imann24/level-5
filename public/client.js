@@ -102,6 +102,7 @@ function onEvent(ev) {
     case 'hit': burst(ev.x, ev.y, 10, RED, 70); shakeT = 0.18; break;
     case 'death': burst(ev.x, ev.y, 22, PLAYER_COLORS[ev.c] || WHITE, 90); shakeT = 0.3; break;
     case 'pickup': burst(ev.x, ev.y, 6, PERI, 40, true); break;
+    case 'heal': burst(ev.x, ev.y, 12, GREEN, 55, true); break;
     case 'drop': burst(ev.x, ev.y, 4, PERI, 30, true); break;
     case 'floorred': shakeT = 0.2; break;
   }
@@ -201,6 +202,14 @@ function drawSwordIcon(x, y, ang, c = PERI) {
   // hilt
   stroke(x - bx * 2, y - by * 2, x - bx * 4, y - by * 4, '#7d8ac2', 2);
 }
+function drawHealthIcon(x, y, t) {
+  // green floating plus with a soft sparkle
+  px(x - 1, y - 4, 3, 9, GREEN);
+  px(x - 4, y - 1, 9, 3, GREEN);
+  if (Math.floor(t * 3) % 2 === 0) px(x + 4, y - 5, 1, 1, '#aef7c2');
+  else px(x - 5, y + 3, 1, 1, '#aef7c2');
+}
+
 function drawShieldIcon(x, y, big = false) {
   const rw = big ? 3 : 2, rh = big ? 5 : 4;
   for (let dy = -rh; dy <= rh; dy++)
@@ -401,11 +410,12 @@ function drawGame(s, t) {
   drawStage(s.fl, t);
   for (const pl of s.pf) drawPlatform(pl);
 
-  // powerups on ground
+  // powerups on ground / floating health
   for (const pu of s.pu) {
-    const bob = Math.sin(t * 4 + pu.id) * 1;
+    const bob = Math.sin(t * 4 + pu.id) * (pu.fl ? 2.5 : 1);
     if (pu.k === 'sword') drawSwordIcon(pu.x, pu.y + 4 + bob, -Math.PI / 2);
-    else drawShieldIcon(pu.x, pu.y + 3 + bob, true);
+    else if (pu.k === 'shield') drawShieldIcon(pu.x, pu.y + 3 + bob, true);
+    else if (pu.k === 'health') drawHealthIcon(pu.x, pu.y + bob, t + pu.id);
   }
 
   for (const h of s.hz) {

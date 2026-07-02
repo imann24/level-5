@@ -72,19 +72,72 @@ tick(room, 3);
 check('sword flips h-mover to vertical', hz2.axis === 'v' && hz2.vy !== 0 && hz2.vx === 0);
 function FLOOR_Y_() { return 206; }
 
-// powerup pickup + swap + drop
+// powerup pickup (use key) + swap + drop (inter key)
 room.powerups.length = 0;
 room.powerups.push({ id: 2000, kind: 'shield', x: b.x + 4, y: b.y + 5, vy: 0 });
-b.edge.inter = true;
+b.edge.use = true;
 tick(room, 1);
-check('overlap pickup swaps: now shield', b.power === 'shield');
+check('use key over powerup swaps: now shield', b.power === 'shield');
 check('old sword dropped in place', room.powerups.length === 1 && room.powerups[0].kind === 'sword');
-b.edge.inter = true;
+b.swingT = 0; b.edge.use = true;
 tick(room, 1);
 check('pick dropped sword back', b.power === 'sword');
+b.swingT = 0; b.swingCd = 0;
 b.x = 200; b.edge.inter = true;
 tick(room, 1);
-check('interact away from powerup drops held', b.power === null && room.powerups.length === 2);
+check('drop key drops held powerup', b.power === null && room.powerups.length === 2);
+b.x = 60; b.edge.use = true; // step away from the dropped item first
+tick(room, 1);
+check('use key away from powerups does nothing', b.power === null && room.powerups.length === 2);
+
+// keep the rest deterministic: no random spawns, floor cycles, or level flips
+room.spawnT = 999; room.timer = 999; room.floorT = 999; room.floorState = 0;
+room.powerups.length = 0;
+
+// tight sword hitbox: far hazard is not hit
+room.hazards.length = 0;
+b.alive = true; b.hp = 3; b.invulnT = 999;
+b.power = 'sword'; b.x = 100; b.y = 206 - 18; b.facing = 1; b.swingCd = 0;
+const far = { id: 1002, kind: 'tri', axis: 'h', x: 130, y: b.y, w: 13, h: 13, vx: -0.001, vy: 0, life: 5, blockCd: 0 };
+room.hazards.push(far);
+b.edge.use = true;
+tick(room, 3);
+check('sword misses hazard beyond reach', far.axis === 'h');
+b.power = null;
+
+// drop through platform with down key
+{
+  room.hazards.length = 0;
+  const pl = room.platforms[0];
+  b.x = pl.x + 2; b.y = pl.y - 18; b.vy = 0; b.in.d = 0;
+  tick(room, 1);
+  check('standing on platform', b.onGround && b.groundKind === 'plat');
+  b.in.d = 1;
+  tick(room, 3);
+  check('down key drops through platform', !b.onGround || b.groundKind !== 'plat' || b.y > pl.y - 18 + 1);
+  b.in.d = 0;
+}
+
+// health pickup: heals only when hurt, collected on touch
+room.powerups.length = 0;
+b.hp = 3; b.x = 100; b.y = 100; b.vy = 0;
+room.powerups.push({ id: 2100, kind: 'health', float: true, x: b.x + 4, y: b.y + 5, vy: 0 });
+tick(room, 1);
+check('full hp ignores health pickup', b.hp === 3 && room.powerups.length === 1);
+b.hp = 1; b.x = 100; b.y = 100; b.vy = 0;
+tick(room, 1);
+check('hurt player collects health', b.hp === 2 && room.powerups.length === 0);
+check('health pickup not grabbable with use key', room.powerups.every((q) => q.kind !== 'health'));
+
+// health pickups only generated from level 2 on
+{
+  const r2 = new Room();
+  r2.level = 1; r2.startLevel();
+  const l1 = r2.powerups.some((q) => q.kind === 'health');
+  r2.level = 2; r2.startLevel();
+  const l2 = r2.powerups.some((q) => q.kind === 'health');
+  check('no health on level 1, health on level 2', !l1 && l2);
+}
 
 // deaths -> gameover -> lobby
 a.hp = 1; a.invulnT = 0; a.x = 100; a.y = 100; a.vy = 0;
@@ -111,6 +164,14 @@ check('floor turns red', room.floorState === 2);
 a.x = 100; a.y = 206 - 18; a.vy = 0; a.invulnT = 0; a.alive = true; a.hp = 3;
 tick(room, 2);
 check('red floor damages grounded player', a.hp < 3);
+
+// dead players respawn on level pass; survivors keep their hp (no auto-heal)
+a.alive = false; a.hp = 0;
+b.alive = true; b.hp = 2;
+room.timer = 0.02;
+tick(room, 3);
+check('dead player respawns next level', a.alive && a.hp === 3);
+check('survivor hp carries over (no auto-heal)', b.alive && b.hp === 2);
 
 // 5th connection is spectator
 const extra = [fakeWs(), fakeWs(), fakeWs()];
